@@ -2,16 +2,17 @@
 # PayGate live deploy (a27pay.tech). Run after every push to main, for any change
 # (screens, PHP code, database):
 #
-#   bash ~/public_html/a27pay.tech/scripts/deploy-live.sh
+#   bash /home/a27pay/paygate/scripts/deploy-live.sh
 #
-# Works from root or from a27pay_tech. It pulls main, installs packages,
-# rebuilds the screens, backs up and migrates the database (as paygate_owner),
+# Works from root or from a27pay. The code lives outside public_html (only the
+# forwarding .htaccess is in /home/a27pay/public_html), so .env can never be served.
+# It pulls main, installs packages, rebuilds the screens, backs up and migrates the database (as paygate_owner),
 # refreshes Laravel's caches and restarts the web server and workers.
 # See Document/Webuzo-Server-Setup.md, Part E.
 set -euo pipefail
 
-APP_USER=a27pay_tech
-APP_DIR=/home/$APP_USER/public_html/a27pay.tech
+APP_USER=a27pay
+APP_DIR=/home/$APP_USER/paygate
 
 # Always run as the site user (never as root: files would become root's).
 if [ "$(id -u)" -eq 0 ]; then
@@ -32,7 +33,7 @@ if [ "${1:-}" != "--pulled" ]; then
         git status --short --untracked-files=no
         exit 1
     fi
-    git pull --ff-only origin main   # public/.htaccess keeps the server's rules (skip-worktree)
+    git pull --ff-only origin main
     exec bash "$PAYGATE_APP/scripts/deploy-live.sh" --pulled
 fi
 
