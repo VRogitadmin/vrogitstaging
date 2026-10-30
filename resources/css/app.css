@@ -1,0 +1,241 @@
+@import 'tailwindcss';
+
+@import 'tw-animate-css';
+
+@source '../views';
+@source '../../vendor/laravel/framework/src/Illuminate/Pagination/resources/views/*.blade.php';
+
+@custom-variant dark (&:is(.dark *));
+
+@theme {
+    --font-sans:
+        'Poppins', ui-sans-serif, system-ui, sans-serif, 'Apple Color Emoji',
+        'Segoe UI Emoji', 'Segoe UI Symbol', 'Noto Color Emoji';
+    --font-display:
+        'Poppins', ui-sans-serif, system-ui, sans-serif, 'Apple Color Emoji',
+        'Segoe UI Emoji', 'Segoe UI Symbol', 'Noto Color Emoji';
+    --font-mono:
+        'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+
+    --radius-lg: var(--radius);
+    --radius-md: calc(var(--radius) - 2px);
+    --radius-sm: calc(var(--radius) - 4px);
+
+    --color-background: var(--background);
+    --color-foreground: var(--foreground);
+
+    --color-card: var(--card);
+    --color-card-foreground: var(--card-foreground);
+
+    --color-popover: var(--popover);
+    --color-popover-foreground: var(--popover-foreground);
+
+    --color-primary: var(--primary);
+    --color-primary-foreground: var(--primary-foreground);
+
+    --color-secondary: var(--secondary);
+    --color-secondary-foreground: var(--secondary-foreground);
+
+    --color-muted: var(--muted);
+    --color-muted-foreground: var(--muted-foreground);
+
+    --color-accent: var(--accent);
+    --color-accent-foreground: var(--accent-foreground);
+
+    --color-destructive: var(--destructive);
+    --color-destructive-foreground: var(--destructive-foreground);
+
+    --color-border: var(--border);
+    --color-input: var(--input);
+    --color-ring: var(--ring);
+
+    --color-chart-1: var(--chart-1);
+    --color-chart-2: var(--chart-2);
+    --color-chart-3: var(--chart-3);
+    --color-chart-4: var(--chart-4);
+    --color-chart-5: var(--chart-5);
+
+    --color-sidebar: var(--sidebar);
+    --color-sidebar-foreground: var(--sidebar-foreground);
+    --color-sidebar-primary: var(--sidebar-primary);
+    --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+    --color-sidebar-accent: var(--sidebar-accent);
+    --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+    --color-sidebar-border: var(--sidebar-border);
+    --color-sidebar-ring: var(--sidebar-ring);
+}
+
+/*
+ * PayGate design tokens (Document/PayGate UI redesign). Use them as Tailwind
+ * utilities: bg-sf, text-tx2, border-ln, bg-ac, text-ok, bg-okb, …
+ */
+@theme inline {
+    --color-bg: var(--pg-bg);
+    --color-sf: var(--pg-sf);
+    --color-sf2: var(--pg-sf2);
+    --color-ln: var(--pg-ln);
+    --color-ln2: var(--pg-ln2);
+    --color-tx: var(--pg-tx);
+    --color-tx2: var(--pg-tx2);
+    --color-tx3: var(--pg-tx3);
+    --color-ac: var(--pg-ac);
+    --color-acs: var(--pg-acs);
+    --color-act: var(--pg-act);
+    --color-ac2: var(--pg-ac2);
+    --color-ok: var(--pg-ok);
+    --color-okb: var(--pg-okb);
+    --color-wn: var(--pg-wn);
+    --color-wnb: var(--pg-wnb);
+    --color-er: var(--pg-er);
+    --color-erb: var(--pg-erb);
+    --color-in: var(--pg-in);
+    --color-inb: var(--pg-inb);
+    --color-hd: var(--pg-hd);
+    --color-hdb: var(--pg-hdb);
+    --color-rv: var(--pg-rv);
+    --color-rvb: var(--pg-rvb);
+    --color-nt: var(--pg-nt);
+    --color-ntb: var(--pg-ntb);
+    --color-nav: #240c33;
+    --spacing-rp: var(--pg-rp);
+}
+
+:root {
+    /* PayGate palette: light */
+    --pg-bg: #f5f6f8;
+    --pg-sf: #ffffff;
+    --pg-sf2: #f8fafc;
+    --pg-ln: #e4e7ec;
+    --pg-ln2: #eef0f3;
+    --pg-tx: #0f172a;
+    --pg-tx2: #475569;
+    --pg-tx3: #64748b;
+    --pg-ok: #047857;
+    --pg-okb: #ecfdf5;
+    --pg-wn: #b45309;
+    --pg-wnb: #fffbeb;
+    --pg-er: #b91c1c;
+    --pg-erb: #fef2f2;
+    --pg-in: #1d4ed8;
+    --pg-inb: #eff6ff;
+    --pg-hd: #c2410c;
+    --pg-hdb: #fff7ed;
+    --pg-rv: #6d28d9;
+    --pg-rvb: #f5f3ff;
+    --pg-nt: #475569;
+    --pg-ntb: #f1f5f9;
+    /* Row padding: compact 9px / comfortable 13px */
+    --pg-rp: 9px;
+    /* Accent: PayGate magenta, with plum as the gradient end (ac → ac2) */
+    --pg-ac: #d6287f;
+    --pg-ac2: #3e1264;
+    --pg-acs: #fdf0f6;
+    --pg-act: #9d1a5c;
+
+    /* shadcn/ui variables mapped onto the PayGate palette */
+    --background: var(--pg-bg);
+    --foreground: var(--pg-tx);
+    --card: var(--pg-sf);
+    --card-foreground: var(--pg-tx);
+    --popover: var(--pg-sf);
+    --popover-foreground: var(--pg-tx);
+    --primary: var(--pg-ac);
+    --primary-foreground: #ffffff;
+    --secondary: var(--pg-sf2);
+    --secondary-foreground: var(--pg-tx);
+    --muted: var(--pg-sf2);
+    --muted-foreground: var(--pg-tx3);
+    --accent: var(--pg-acs);
+    --accent-foreground: var(--pg-act);
+    --destructive: var(--pg-er);
+    --destructive-foreground: var(--pg-er);
+    --border: var(--pg-ln);
+    --input: var(--pg-ln);
+    --ring: var(--pg-ac);
+    --chart-1: var(--pg-ac);
+    --chart-2: var(--pg-ok);
+    --chart-3: var(--pg-wn);
+    --chart-4: var(--pg-rv);
+    --chart-5: var(--pg-hd);
+    --radius: 0.5rem;
+    --sidebar: #240c33;
+    --sidebar-foreground: #c8d1df;
+    --sidebar-primary: var(--pg-ac);
+    --sidebar-primary-foreground: #ffffff;
+    --sidebar-accent: rgba(255, 255, 255, 0.06);
+    --sidebar-accent-foreground: #ffffff;
+    --sidebar-border: rgba(255, 255, 255, 0.06);
+    --sidebar-ring: var(--pg-ac);
+}
+
+.dark {
+    --pg-bg: #0a0f1c;
+    --pg-sf: #0f1728;
+    --pg-sf2: #131d31;
+    --pg-ln: #1f2a3f;
+    --pg-ln2: #18233a;
+    --pg-tx: #e6eaf2;
+    --pg-tx2: #a7b1c4;
+    --pg-tx3: #8391a8;
+    --pg-ok: #34d399;
+    --pg-okb: rgba(16, 185, 129, 0.13);
+    --pg-wn: #fbbf24;
+    --pg-wnb: rgba(245, 158, 11, 0.13);
+    --pg-er: #f87171;
+    --pg-erb: rgba(239, 68, 68, 0.13);
+    --pg-in: #60a5fa;
+    --pg-inb: rgba(59, 130, 246, 0.13);
+    --pg-hd: #fb923c;
+    --pg-hdb: rgba(249, 115, 22, 0.13);
+    --pg-rv: #a78bfa;
+    --pg-rvb: rgba(139, 92, 246, 0.15);
+    --pg-nt: #a7b1c4;
+    --pg-ntb: rgba(148, 163, 184, 0.12);
+}
+
+/* One brand accent for every portal and the sign-in screens. Set on the
+   layout and on <html> (so dialogs portalled to <body> match). */
+.dark,
+.dark [data-portal],
+.dark[data-portal] {
+    --pg-ac: #e0479a;
+    --pg-ac2: #6b2a9e;
+    --pg-acs: rgba(214, 40, 127, 0.16);
+    --pg-act: #f9a8d4;
+}
+
+[data-density='comfortable'] {
+    --pg-rp: 13px;
+}
+
+@keyframes pg-pulse {
+    0%,
+    100% {
+        opacity: 1;
+    }
+    50% {
+        opacity: 0.35;
+    }
+}
+
+/* Brand fill for primary buttons and active menu items: magenta → plum
+   with a soft magenta glow (design: Dashboard, Today, Submit). */
+@utility bg-brand {
+    background-image: linear-gradient(90deg, var(--pg-ac), var(--pg-ac2));
+    box-shadow: 0 8px 18px -10px
+        color-mix(in srgb, var(--pg-ac) 90%, transparent);
+}
+
+@layer base {
+    * {
+        @apply border-border;
+    }
+
+    body {
+        @apply bg-background text-foreground;
+        font-size: 13px;
+        font-feature-settings:
+            'tnum' 1,
+            'cv11' 1;
+    }
+}

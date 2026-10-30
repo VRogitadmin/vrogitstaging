@@ -1,0 +1,254 @@
+<?php
+
+namespace Tests\Feature\Branches;
+
+use App\Domain\Branch\Models\Branch;
+use App\Domain\Core\Identity\Models\User;
+use App\Domain\Core\Rbac\SystemRoles;
+use App\Domain\PaymentAccount\Enums\AccountStatus;
+use App\Domain\PaymentAccount\Models\PaymentAccount;
+use Illuminate\Foundation\Testing\RefreshDatabase;
+use Inertia\Testing\AssertableInertia as Assert;
+use Tests\TestCase;
+
+class AccountLogTest extends TestCase
+{
+    use RefreshDatabase;
+
+    private Branch $branch;
+
+    private User $owner;
+
+    private User $admin;
+
+    protected function setUp(): void
+    {
+        parent::setUp();
+
+        $this->branch = Branch::factory()->create(['code' => 'BR-LOG', 'name' => 'Log Branch', 'deposit_min_amount' => 50000, 'deposit_max_amount' => 5000000]);
+        $this->owner = User::factory()->branch(SystemRoles::BRANCH_OWNER, $this->branch)->withTwoFactor()->create(['name' => 'Branch Owner', 'username' => 'branch.owner']);
+        $this->admin = User::factory()->admin()->withTwoFactor()->create(['name' => 'Ops Admin', 'username' => 'ops.admin']);
+    }
+
+    private function activeAccount(string $label = 'HDFC current 1', string $accountNumber = '5010 0482 716640'): PaymentAccount
+    {
+        $this->actingAs($this->owner)->post(route('branch.accounts.store'), [
+            'label' => $label,
+            'account_holder_name' => 'Ashan Ali Shaik',
+            'is_bank_enabled' => true,
+            'bank_name' => 'HDFC Bank',
+            'ifsc' => 'HDFC0001203',
+            'account_number' => $accountNumber,
+            'is_upi_enabled' => false,
+            'min_amount' => '500',
+            'max_amount' => '50000',
+            'daily_amount_limit' => '200000',
+            'daily_count_limit' => '-1',
+            'max_open_sessions' => 5,
+        ])->assertSessionHasNoErrors();
+
+        $account = PaymentAccount::query()->where('label', $label)->firstOrFail();
+        $this->actingAs($this->admin)->post(route('admin.accounts.approve', $account))->assertSessionHasNoErrors();
+        $this->actingAs($this->owner)->put(route('branch.accounts.status', $account), ['status' => 'active'])->assertSessionHasNoErrors();
+
+        return $account;
+    }
+
+    public function test_pausing_needs_a_reason_from_branch_users_and_admins()
+    {
+        $account = $this->activeAccount();
+
+        $this->actingAs($this->owner)->put(route('branch.accounts.status', $account), ['status' => 'inactive'])->assertSessionHasErrors('reason');
+        $this->assertSame(AccountStatus::Active, $account->fresh()?->status);
+
+        $this->actingAs($this->admin)->put(route('admin.accounts.status', $account), ['status' => 'inactive'])->assertSessionHasNoErrors();
+        $this->assertSame(AccountStatus::Inactive, $account->fresh()?->status);
+    }
+
+    public function test_the_log_shows_every_account_event_with_who_why_ip_and_branch()
+    {
+        $account = $this->activeAccount();
+        $this->actingAs($this->owner)->put(route('branch.accounts.status', $account), ['status' => 'inactive', 'reason' => 'Bank asked us to stop for a day'])->assertSessionHasNoErrors();
+        $this->actingAs($this->admin)->put(route('admin.accounts.status', $account), ['status' => 'active', 'reason' => 'Branch confirmed the account is ready'])->assertSessionHasNoErrors();
+
+        $this->actingAs($this->admin)->get(route('admin.accounts.logs.index'))
+            ->assertOk()
+            ->assertInertia(fn (Assert $page) => $page
+                ->component('accounts/logs')
+                ->where('logs.total', 5)
+                ->where('logs.data.0.event', 'activated')
+                ->where('logs.data.0.from', 'inactive')
+                ->where('logs.data.0.to', 'active')
+                ->where('logs.data.0.who.username', 'ops.admin')
+                ->where('logs.data.0.who.portal', 'admin')
+                ->where('logs.data.1.event', 'deactivated')
+                ->where('logs.data.1.from', 'active')
+                ->where('logs.data.1.to', 'inactive')
+                ->where('logs.data.1.reason', 'Bank asked us to stop for a day')
+                ->where('logs.data.1.who.name', 'Branch Owner')
+                ->where('logs.data.1.who.username', 'branch.owner')
+                ->where('logs.data.1.who.role', $this->owner->role->name)
+                ->where('logs.data.1.who.portal', 'branch')
+                ->where('logs.data.1.ip', '127.0.0.1')
+                ->where('logs.data.1.branch.code', 'BR-LOG')
+                ->where('logs.data.1.branch.name', 'Log Branch')
+                ->where('logs.data.1.account.holder', 'Ashan Ali Shaik')
+                ->where('logs.data.1.account.account_number', 'XXXX 6640')
+                ->where('logs.data.2.event', 'activated')
+                ->where('logs.data.3.event', 'verified')
+                ->where('logs.data.4.event', 'created'));
+    }
+
+    public function test_edits_list_the_changed_fields()
+    {
+        $account = $this->activeAccount();
+        $this->actingAs($this->owner)->put(route('branch.accounts.update', $account), [
+            'label' => 'HDFC current 1',
+            'account_holder_name' => 'Ashan Ali Shaik',
+            'is_bank_enabled' => true,
+            'bank_name' => 'HDFC Bank',
+            'ifsc' => 'HDFC0001203',
+            'is_upi_enabled' => false,
+            'min_amount' => '500',
+            'max_amount' => '40000',
+            'daily_amount_limit' => '200000',
+            'daily_count_limit' => '-1',
+            'max_open_sessions' => 5,
+        ])->assertSessionHasNoErrors();
+
+        $this->actingAs($this->admin)->get(route('admin.accounts.logs.index', ['event' => 'updated']))
+            ->assertInertia(fn (Assert $page) => $page
+                ->where('logs.total', 1)
+                ->where('logs.data.0.event', 'updated')
+                ->where('logs.data.0.fields.0', 'Before Maximum per payment: ₹50,000.00. Now: ₹40,000.00')
+                ->where('logs.data.0.changes.0.field', 'Maximum per payment')
+                ->where('logs.data.0.changes.0.before', '₹50,000.00')
+                ->where('logs.data.0.changes.0.now', '₹40,000.00'));
+    }
+
+    public function test_changing_the_upi_id_shows_before_and_now()
+    {
+        $account = $this->activeAccount();
+        $edit = fn (string $upi) => $this->actingAs($this->owner)->put(route('branch.accounts.update', $account), [
+            'label' => 'HDFC current 1',
+            'account_holder_name' => 'Ashan Ali Shaik',
+            'is_bank_enabled' => true,
+            'bank_name' => 'HDFC Bank',
+            'ifsc' => 'HDFC0001203',
+            'is_upi_enabled' => true,
+            'upi_id' => $upi,
+            'upi_display_name' => 'Amar Enterprises',
+            'min_amount' => '500',
+            'max_amount' => '50000',
+            'daily_amount_limit' => '200000',
+            'daily_count_limit' => '-1',
+            'max_open_sessions' => 5,
+        ])->assertSessionHasNoErrors();
+
+        $edit('amar.old@ybl');
+        $edit('amar.new@ybl');
+
+        $this->actingAs($this->admin)->get(route('admin.accounts.logs.index', ['event' => 'updated']))
+            ->assertInertia(fn (Assert $page) => $page
+                ->where('logs.total', 2)
+                ->where('logs.data.0.changes', fn ($changes) => collect($changes)->contains(fn ($change) => $change['field'] === 'UPI ID' && $change['before'] === 'amar.old@ybl' && $change['now'] === 'amar.new@ybl'))
+                ->where('logs.data.1.changes', fn ($changes) => collect($changes)->contains(fn ($change) => $change['field'] === 'UPI ID' && $change['before'] === '—' && $change['now'] === 'amar.old@ybl')));
+    }
+
+    public function test_filters_narrow_the_log()
+    {
+        $first = $this->activeAccount();
+        $second = $this->activeAccount('ICICI savings', '1234 5678 9012');
+        $this->actingAs($this->owner)->put(route('branch.accounts.status', $first), ['status' => 'inactive', 'reason' => 'Limit reached early'])->assertSessionHasNoErrors();
+        $this->actingAs($this->admin)->put(route('admin.accounts.verification', $second), ['verification' => 'unverified', 'reason' => 'Closed by the bank'])->assertSessionHasNoErrors();
+
+        $other = Branch::factory()->create();
+
+        $this->actingAs($this->admin)->get(route('admin.accounts.logs.index', ['event' => 'deactivated']))
+            ->assertInertia(fn (Assert $page) => $page->where('logs.total', 1)->where('logs.data.0.account.id', $first->id));
+
+        $this->actingAs($this->admin)->get(route('admin.accounts.logs.index', ['account' => $second->id]))
+            ->assertInertia(fn (Assert $page) => $page->where('logs.total', 4)->where('account.id', $second->id)->where('logs.data.0.event', 'rejected'));
+
+        $this->actingAs($this->admin)->get(route('admin.accounts.logs.index', ['branch' => $other->id]))
+            ->assertInertia(fn (Assert $page) => $page->where('logs.total', 0));
+
+        $this->actingAs($this->admin)->get(route('admin.accounts.logs.index', ['search' => 'Closed by']))
+            ->assertInertia(fn (Assert $page) => $page->where('logs.total', 1)->where('logs.data.0.event', 'rejected'));
+
+        $this->actingAs($this->admin)->get(route('admin.accounts.logs.index', ['search' => '9012', 'event' => 'activated']))
+            ->assertInertia(fn (Assert $page) => $page->where('logs.total', 1)->where('logs.data.0.account.id', $second->id));
+
+        $this->actingAs($this->admin)->get(route('admin.accounts.logs.index', ['search' => 'ops.admin']))
+            ->assertInertia(fn (Assert $page) => $page->where('logs.total', 3));
+
+        $this->actingAs($this->admin)->get(route('admin.accounts.logs.index', ['from' => now()->subDays(60)->toDateString(), 'to' => now()->subDays(40)->toDateString()]))
+            ->assertInertia(fn (Assert $page) => $page->where('logs.total', 0));
+    }
+
+    public function test_export_streams_the_filtered_rows_as_safe_csv()
+    {
+        $account = $this->activeAccount();
+        $this->actingAs($this->owner)->put(route('branch.accounts.status', $account), ['status' => 'inactive', 'reason' => '=HYPERLINK("http://x")'])->assertSessionHasNoErrors();
+
+        $response = $this->actingAs($this->admin)->get(route('admin.accounts.logs.export', ['event' => 'deactivated']));
+        $response->assertOk();
+        $csv = $response->streamedContent();
+        $lines = array_values(array_filter(explode("\n", trim($csv))));
+
+        $this->assertCount(2, $lines);
+        $this->assertStringContainsString('When,Event', $lines[0]);
+        $this->assertStringContainsString('Inactive,active,inactive', $lines[1]);
+        $this->assertStringContainsString('XXXX 6640', $lines[1]);
+        $this->assertStringContainsString('branch.owner', $lines[1]);
+        $this->assertStringContainsString('BR-LOG', $lines[1]);
+        $this->assertStringContainsString('\'=HYPERLINK', $lines[1]);
+        $this->assertStringNotContainsString('50100482716640', $csv);
+    }
+
+    public function test_only_admins_open_the_admin_log()
+    {
+        $this->actingAs($this->owner)->get(route('admin.accounts.logs.index'))->assertForbidden();
+        $this->actingAs($this->owner)->get(route('admin.accounts.logs.export'))->assertForbidden();
+        $this->actingAs(User::factory()->partner()->create())->get(route('admin.accounts.logs.index'))->assertForbidden();
+        $this->actingAs(User::factory()->partner()->create())->get(route('branch.accounts.logs.index'))->assertForbidden();
+    }
+
+    public function test_a_branch_sees_the_log_of_its_own_accounts_only()
+    {
+        $account = $this->activeAccount();
+        $this->actingAs($this->admin)->put(route('admin.accounts.status', $account), ['status' => 'inactive', 'reason' => 'Checked by ops'])->assertSessionHasNoErrors();
+
+        // Another branch's account never shows, even when asked for by id or branch.
+        $other = Branch::factory()->create(['deposit_min_amount' => 50000, 'deposit_max_amount' => 5000000]);
+        $otherOwner = User::factory()->branch(SystemRoles::BRANCH_OWNER, $other)->withTwoFactor()->create();
+        $this->actingAs($otherOwner)->post(route('branch.accounts.store'), [
+            'label' => 'Other', 'account_holder_name' => 'Other Holder', 'is_bank_enabled' => true, 'bank_name' => 'SBI',
+            'ifsc' => 'SBIN0001203', 'account_number' => '11112222333344', 'is_upi_enabled' => false,
+            'min_amount' => '500', 'max_amount' => '50000', 'daily_amount_limit' => '200000', 'daily_count_limit' => '-1', 'max_open_sessions' => 5,
+        ])->assertSessionHasNoErrors();
+        $foreign = PaymentAccount::query()->where('label', 'Other')->sole();
+
+        $this->actingAs($this->owner)->get(route('branch.accounts.logs.index', ['branch' => $other->id]))
+            ->assertOk()
+            ->assertInertia(fn (Assert $page) => $page
+                ->component('accounts/logs')
+                ->where('portal', 'branch')
+                ->where('branches', [])
+                ->where('filters.branch', null)
+                ->where('logs.total', 4)
+                ->where('logs.data.0.event', 'deactivated')
+                ->where('logs.data.0.who.portal', 'admin')
+                // PayGate staff's IP stays hidden from the branch; its own users' shows.
+                ->where('logs.data.0.ip', null)
+                ->where('logs.data.1.who.portal', 'branch')
+                ->where('logs.data.1.ip', '127.0.0.1'));
+
+        $this->actingAs($this->owner)->get(route('branch.accounts.logs.index', ['account' => $foreign->id]))
+            ->assertInertia(fn (Assert $page) => $page->where('logs.total', 0)->where('account', null));
+
+        $csv = $this->actingAs($this->owner)->get(route('branch.accounts.logs.export'))->streamedContent();
+        $this->assertStringNotContainsString('Other Holder', $csv);
+        $this->assertStringContainsString('Checked by ops', $csv);
+    }
+}
