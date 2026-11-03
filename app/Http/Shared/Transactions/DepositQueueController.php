@@ -8,12 +8,12 @@ use App\Domain\Network\Models\PartnerBranchMapping;
 use App\Domain\PaymentAccount\Models\PaymentAccount;
 use App\Domain\Platform\Models\ReasonCode;
 use App\Domain\Reconciliation\Actions\AutoApproveDeposit;
+use App\Domain\Reporting\Period;
 use App\Domain\Transaction\Actions\DecidePayin;
 use App\Domain\Transaction\Actions\MovePayin;
 use App\Domain\Transaction\Models\Transaction;
 use App\Http\Controller;
 use App\Support\Money;
-use Carbon\CarbonImmutable;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
@@ -50,16 +50,16 @@ class DepositQueueController extends Controller
         $tab = array_key_exists((string) $request->query('tab'), self::TABS) ? (string) $request->query('tab') : 'pending';
         $filters = TransactionController::filters($request, $actor);
         $search = trim((string) $request->query('search'));
-        $today = CarbonImmutable::now(config('app.business_timezone'))->startOfDay()->utc();
-        $dated = $filters['from'] !== null || $filters['to'] !== null;
+        $period = Period::fromRequest($request);
 
         $base = fn () => TransactionController::filtered(TransactionController::scoped($actor)->where('direction', 'payin'), $filters);
 
-        // Approved / declined tabs show today's decisions (India time),
-        // unless a date range is chosen.
+        // Approved / declined tabs show the decisions made in the period
+        // (Today by default). Open tabs show every open deposit, any date,
+        // so nothing waiting is missed.
         $inTab = fn (Builder $query, string $key) => $query
             ->whereIn('status', self::TABS[$key])
-            ->when(! $dated && in_array($key, ['approved', 'declined'], true), fn (Builder $query) => $query->where('decided_at', '>=', $today));
+            ->when(in_array($key, ['approved', 'declined'], true), fn (Builder $query) => $period->apply($query, 'decided_at'));
 
         $items = $inTab($base(), $tab)
             ->with(TransactionController::ROW_RELATIONS)
@@ -83,6 +83,7 @@ class DepositQueueController extends Controller
                 'data' => $this->rows($items->items(), $actor),
             ],
             'filters' => ['search' => $search, ...$filters],
+            'period' => $period->toArray(),
             ...TransactionController::filterOptions($actor),
             'reasons' => ReasonCode::options('payin_reject'),
             'selected' => is_string($selected) ? $selected : null,
@@ -180,7 +181,7 @@ class DepositQueueController extends Controller
             'reason' => ['required', 'string', 'max:500'],
         ]);
 
-        $account = PaymentAccount::query()->with('branch')->findOrFail((string) $data['payment_account_id']);
+        $account = PaymentAccount::query()->notDeleted()->with('branch')->findOrFail((string) $data['payment_account_id']);
         // The new branch's statement may already show it: then it is approved at once.
         $approved = DB::transaction(fn () => $autoApprove->forPayin($move->handle($actor, $transaction, $account, $data['reason'])));
 
@@ -208,6 +209,7 @@ class DepositQueueController extends Controller
     private function moveOptions(Transaction $payin): array
     {
         return PaymentAccount::query()
+            ->notDeleted()
             ->whereIn('branch_id', PartnerBranchMapping::query()->where('partner_id', $payin->partner_id)->select('branch_id'))
             ->whereKeyNot((string) $payin->payment_account_id)
             ->with('branch')
