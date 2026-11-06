@@ -1,5 +1,5 @@
 import { Head, Link, router, useForm } from '@inertiajs/react';
-import { Download, History, Search, Upload } from 'lucide-react';
+import { Download, History, Info, Search, Upload } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
 import { PgButton } from '@/components/pg/button';
@@ -13,7 +13,7 @@ import { ViewTabs } from '@/components/pg/filter-bar';
 import { FormDialog } from '@/components/pg/form-dialog';
 import { KpiGrid, StatTile } from '@/components/pg/kpi-card';
 import { MultiSelect } from '@/components/pg/multi-select';
-import { PageHeader } from '@/components/pg/page-header';
+import { LiveIndicator, PageHeader } from '@/components/pg/page-header';
 import { PeriodFilter, periodQuery } from '@/components/pg/period-filter';
 import type { PeriodQuery, PeriodValue } from '@/components/pg/period-filter';
 import {
@@ -31,6 +31,11 @@ import {
     StatementImportDialog,
 } from '@/components/pg/statement-import-dialog';
 import { StatusBadge } from '@/components/pg/status-badge';
+import {
+    Tooltip,
+    TooltipContent,
+    TooltipTrigger,
+} from '@/components/ui/tooltip';
 import { formatDate, formatDateTime } from '@/lib/dates';
 import { formatPaise } from '@/lib/money';
 import adminCases from '@/routes/admin/cases';
@@ -106,12 +111,16 @@ type Props = {
     accounts: Account[];
     branches: { id: string; code: string; name: string }[];
     can: { create: boolean; resolve: boolean };
+    reasons: Record<string, string>;
     selected: string | null;
     detail?: Detail | null;
 };
 
 /** Debit entry is hidden for now (client request); flip to bring it back. */
 const SHOW_DEBIT = false;
+
+/** Deposit statuses that can still be declined. */
+const WAITING = ['payment_submitted', 'payment_detected', 'under_review'];
 
 const TABS: [string, string][] = [
     ['all', 'All'],
@@ -121,10 +130,13 @@ const TABS: [string, string][] = [
     ['ignored', 'Closed'],
 ];
 
-type Decision = null | { kind: 'approve' | 'hold'; line: StatementLine };
+type Decision = null | {
+    kind: 'approve' | 'hold' | 'decline';
+    line: StatementLine;
+};
 
 /**
- * Manual A/C Statement (Admin) / A/C Statement Entry (branch), as designed:
+ * Manual A/C Statement (Admin and branch), as designed:
  * KPIs, a one-line entry form, filters, the dense lines table and the line
  * drawer with the branch compare block.
  */
@@ -176,6 +188,23 @@ export default function Statements(props: Props) {
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
 
+    // Live: lines get matched and approved in the background (auto-approve,
+    // the branch deciding), so pick up their new status every 15 s. Skipped
+    // while the tab is hidden; the open line's details refresh too.
+    useEffect(() => {
+        const timer = setInterval(() => {
+            if (document.hidden) return;
+            router.reload({
+                only: openId
+                    ? ['items', 'counts', 'kpis', 'detail']
+                    : ['items', 'counts', 'kpis'],
+                ...(openId ? { data: { line: openId } } : {}),
+            });
+        }, 15000);
+
+        return () => clearInterval(timer);
+    }, [openId]);
+
     const openLine = (id: string) => {
         setOpenId(id);
         router.reload({ only: ['detail', 'selected'], data: { line: id } });
@@ -205,6 +234,16 @@ export default function Statements(props: Props) {
                 </PgButton>
             </div>
         );
+
+    // The line's UTR matches a waiting deposit but the amount doesn't:
+    // decline the deposit. The line stays unsettled until the customer
+    // submits the UTR on a deposit of the amount the bank shows.
+    const canDecline = (line: StatementLine) =>
+        !line.linked &&
+        line.case?.status === 'open' &&
+        line.case.type === 'amount_mismatch' &&
+        !!line.transaction?.can_decide &&
+        WAITING.includes(line.transaction.status);
 
     const columns: Column<StatementLine>[] = [
         {
@@ -315,6 +354,26 @@ export default function Statements(props: Props) {
                         status={line.display}
                         label={DISPLAY_LABELS[line.display]}
                     />
+                    {line.case?.status === 'open' && (
+                        <Tooltip>
+                            <TooltipTrigger asChild>
+                                <span className="inline-flex cursor-help items-center gap-1 text-[11.5px] font-semibold whitespace-nowrap text-er">
+                                    {line.case.type_label}
+                                    {line.case.notes && (
+                                        <Info className="size-3.5" />
+                                    )}
+                                </span>
+                            </TooltipTrigger>
+                            {line.case.notes && (
+                                <TooltipContent
+                                    side="bottom"
+                                    className="max-w-[300px] leading-snug"
+                                >
+                                    {line.case.notes}
+                                </TooltipContent>
+                            )}
+                        </Tooltip>
+                    )}
                     {decisionButtons(line)}
                 </div>
             ),
@@ -326,7 +385,7 @@ export default function Statements(props: Props) {
                 <Pairs
                     rows={[
                         ['Txn branch', line.transaction?.branch ?? '—'],
-                        ['Bank entry', line.branch.code],
+                        ['Bank entry', line.branch.name],
                         [
                             'Entry by',
                             line.source === 'import'
@@ -400,6 +459,16 @@ export default function Statements(props: Props) {
                             Details
                         </PgButton>
                     )}
+                    {canDecline(line) && (
+                        <PgButton
+                            className="h-7 px-2 text-xs text-er"
+                            onClick={() =>
+                                setDecision({ kind: 'decline', line })
+                            }
+                        >
+                            Decline
+                        </PgButton>
+                    )}
                 </div>
             ),
         },
@@ -407,20 +476,13 @@ export default function Statements(props: Props) {
 
     return (
         <>
-            <Head
-                title={
-                    portal === 'admin'
-                        ? 'Manual A/C Statement'
-                        : 'A/C Statement Entry'
-                }
-            />
+            <Head title="Manual A/C Statement" />
             <PageHeader
-                title={
-                    portal === 'admin'
-                        ? 'Manual A/C Statement Entry'
-                        : 'A/C Statement Entry'
-                }
+                title="Manual A/C Statement Entry"
                 description="Record bank statement lines and reconcile them against pay-in transactions and branches."
+                eyebrow={
+                    <LiveIndicator>Live · refreshes every 15 s</LiveIndicator>
+                }
                 actions={
                     <>
                         <Link
@@ -629,6 +691,19 @@ export default function Statements(props: Props) {
                                     Match to transaction
                                 </Link>
                             )}
+                            {canDecline(open) && (
+                                <PgButton
+                                    className="h-8 px-3 text-[13px] text-er"
+                                    onClick={() =>
+                                        setDecision({
+                                            kind: 'decline',
+                                            line: open,
+                                        })
+                                    }
+                                >
+                                    Decline
+                                </PgButton>
+                            )}
                             {decisionButtons(open)}
                         </>
                     }
@@ -648,6 +723,46 @@ export default function Statements(props: Props) {
                     line={decision.line}
                     url={deposits.approve(decision.line.transaction.id).url}
                     onClose={() => setDecision(null)}
+                />
+            )}
+            {decision?.kind === 'decline' && decision.line.transaction && (
+                <ConfirmDialog
+                    open
+                    onOpenChange={(next) => !next && setDecision(null)}
+                    title={`Decline ${decision.line.transaction.reference}?`}
+                    description={
+                        <>
+                            {decision.line.case?.notes} The deposit is declined
+                            and the partner told. This bank line stays
+                            unsettled: when the customer submits UTR{' '}
+                            <b className="font-mono">{decision.line.utr}</b> on
+                            a deposit of {formatPaise(decision.line.amount)}, it
+                            is matched and approved.
+                        </>
+                    }
+                    confirmLabel="Decline deposit"
+                    tone="danger"
+                    input={{ label: 'Details (optional, kept in the history)' }}
+                    onConfirm={(details) =>
+                        router.post(
+                            deposits.decline(decision.line.transaction!.id).url,
+                            {
+                                reason_code:
+                                    'wrong_amount' in props.reasons
+                                        ? 'wrong_amount'
+                                        : 'other',
+                                note:
+                                    [decision.line.case?.notes, details]
+                                        .filter(Boolean)
+                                        .join(' ')
+                                        .slice(0, 500) || null,
+                            },
+                            {
+                                preserveScroll: true,
+                                onFinish: () => setDecision(null),
+                            },
+                        )
+                    }
                 />
             )}
             {decision?.kind === 'hold' && decision.line.transaction && (
@@ -745,7 +860,7 @@ function NewLine({
                             <option value="">All</option>
                             {branches.map((item) => (
                                 <option key={item.id} value={item.id}>
-                                    {item.code}
+                                    {item.name}
                                 </option>
                             ))}
                         </SelectInput>
@@ -966,7 +1081,7 @@ function LineDrawer({
                                 ? `${line.linked ? 'From' : 'Points at'} ${txn.direction === 'payout' ? 'payout' : 'pay-in'} ${txn.reference}`
                                 : 'No linked transaction'
                         }
-                        lineBranch={line.branch.code}
+                        lineBranch={line.branch.name}
                         lineSub={`Entered by ${line.entered_by ?? '—'}`}
                         state={line.branch_match}
                     />
@@ -995,7 +1110,7 @@ function LineDrawer({
                                     label: 'Account',
                                     value: accountLabel({
                                         ...line.account,
-                                        branch: line.branch.code,
+                                        branch: line.branch.name,
                                     }),
                                 },
                                 {

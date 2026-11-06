@@ -1,12 +1,12 @@
 import { router, usePage } from '@inertiajs/react';
-import { Code, FlaskConical } from 'lucide-react';
+import { FlaskConical } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { PortalSidebar } from '@/components/pg/portal-sidebar';
 import { PortalTopbar } from '@/components/pg/portal-topbar';
 import { useCurrentUrl } from '@/hooks/use-current-url';
 import { useDensity } from '@/hooks/use-density';
 import { useIsMobile } from '@/hooks/use-mobile';
-import { PORTAL_LABELS, PORTAL_NAV } from '@/lib/portal-nav';
+import { navGroupId, PORTAL_LABELS, PORTAL_NAV } from '@/lib/portal-nav';
 import type { NavGroup } from '@/lib/portal-nav';
 import admin from '@/routes/admin';
 import { toUrl } from '@/lib/utils';
@@ -63,17 +63,20 @@ export default function PortalLayout({
                   },
               ]
             : []),
-        ...(portal === 'admin' && superAdmin
-            ? [
-                  {
-                      label: 'Developer',
-                      icon: Code,
-                      items: [{ label: 'UI kit', href: admin.uiKit() }],
-                  },
-              ]
-            : []),
     ];
-    const groups = [...PORTAL_NAV[portal], ...extras]
+    // Super admins also get the UI kit under Developer.
+    const nav = PORTAL_NAV[portal].map((group) =>
+        portal === 'admin' && superAdmin && group.label === 'Developer'
+            ? {
+                  ...group,
+                  items: [
+                      ...group.items,
+                      { label: 'UI kit', href: admin.uiKit() },
+                  ],
+              }
+            : group,
+    );
+    const groups = [...nav, ...extras]
         .map((group) => ({
             ...group,
             items: group.items.filter(
@@ -103,6 +106,7 @@ export default function PortalLayout({
             .filter((item) => item.href !== undefined)
             .map((item) => ({
                 group: group.label,
+                groupId: navGroupId(group),
                 item,
                 url: toUrl(item.href!),
             })),
@@ -127,7 +131,9 @@ export default function PortalLayout({
         document.documentElement.dataset.density = density;
     }, [portal, density]);
 
-    const activeKey = current ? `${current.group}/${current.item.label}` : null;
+    const activeKey = current
+        ? `${current.groupId}/${current.item.label}`
+        : null;
 
     const toggleSidebar = () => {
         if (isMobile) {

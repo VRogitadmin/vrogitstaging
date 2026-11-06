@@ -92,7 +92,7 @@ type Action =
     | { kind: 'close'; resolution: 'rejected' | 'refunded' };
 
 /**
- * Unsettled UTR (Admin) / Deposit Unsettled (branch): the reconciliation
+ * Unsettled UTR (Admin and branch): the reconciliation
  * case queue. Each open case is a bank line that didn't match cleanly;
  * the drawer offers the transactions it could belong to.
  */
@@ -200,7 +200,7 @@ export default function Cases(props: Props) {
                       header: 'Bank entry branch',
                       cell: (item: CaseRow) => (
                           <span className="rounded-md bg-sf2 px-2 py-0.5 text-xs">
-                              {item.branch.code}
+                              {item.branch.name}
                           </span>
                       ),
                   },
@@ -268,15 +268,9 @@ export default function Cases(props: Props) {
 
     return (
         <>
-            <Head
-                title={
-                    portal === 'admin' ? 'Unsettled UTR' : 'Deposit Unsettled'
-                }
-            />
+            <Head title="Unsettled UTR" />
             <PageHeader
-                title={
-                    portal === 'admin' ? 'Unsettled UTR' : 'Deposit Unsettled'
-                }
+                title="Unsettled UTR"
                 description="Bank statement lines that didn’t match a transaction exactly (same UTR, amount and account). Link each to its transaction, or close it with the reason."
                 actions={
                     <Link
@@ -357,7 +351,7 @@ export default function Cases(props: Props) {
                             <option value="">All branches</option>
                             {branches.map((branch) => (
                                 <option key={branch.id} value={branch.id}>
-                                    {branch.code} · {branch.name}
+                                    {branch.name}
                                 </option>
                             ))}
                         </SelectInput>
@@ -473,7 +467,7 @@ function CaseDrawer({
             title={item.reference}
             monoTitle
             status={<StatusBadge status={item.status} />}
-            subtitle={`${item.type_label} · ${item.branch.code} · opened ${formatDateTime(item.created_at)}`}
+            subtitle={`${item.type_label} · ${item.branch.name} · opened ${formatDateTime(item.created_at)}`}
             summaries={[
                 {
                     label: 'Bank line',
@@ -501,7 +495,7 @@ function CaseDrawer({
                     transactionSub={
                         txn ? `Points at ${txn.reference}` : 'No transaction'
                     }
-                    lineBranch={line.branch.code}
+                    lineBranch={line.branch.name}
                     lineSub={line.account.label}
                     state={line.branch_match}
                 />

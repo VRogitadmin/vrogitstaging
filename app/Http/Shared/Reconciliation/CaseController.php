@@ -22,7 +22,7 @@ use Inertia\Inertia;
 use Inertia\Response;
 
 /**
- * Unsettled UTR (Admin) / Deposit Unsettled (branch): bank statement lines
+ * Unsettled UTR (Admin and branch): bank statement lines
  * that didn't match cleanly, one case each, until someone resolves it:
  * link it to its transaction, approve a late payment (Admin), or close it as
  * not a customer payment / returned to the customer.
@@ -88,7 +88,7 @@ class CaseController extends Controller
                 'resolved_today' => $inTab('resolved')->where('resolved_at', '>=', now(config('app.business_timezone'))->startOfDay()->utc())->count(),
             ],
             'types' => collect(CaseType::cases())->mapWithKeys(fn (CaseType $type) => [$type->value => $type->label()]),
-            'branches' => $actor->isType(UserType::Admin) ? Branch::query()->orderBy('code')->get(['id', 'code', 'name']) : [],
+            'branches' => $actor->isType(UserType::Admin) ? Branch::query()->orderBy('name')->get(['id', 'code', 'name']) : [],
             'selected' => is_string($selected) ? $selected : null,
             // Transactions the open case's bank line could be linked to.
             'candidates' => Inertia::optional(function () use ($selected, $actor, $request) {

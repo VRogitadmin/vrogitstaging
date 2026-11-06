@@ -104,7 +104,7 @@ class UtrUniquenessTest extends TestCase
         $this->approve($payin)->assertSessionHasErrors('bank_utr');
         [, $token] = $this->createPayin();
         $this->post("http://pay.a27pay.local/p/{$token}/method", ['method' => 'upi']);
-        $this->post("http://pay.a27pay.local/p/{$token}/proof", ['utr' => self::UTR])->assertSessionHasErrors('utr');
+        $this->postProof($token, self::UTR)->assertSessionHasErrors('utr');
 
         // And a deposit's UTR can't mark a payout paid.
         $this->approve($payin, '444444444444')->assertSessionHasNoErrors();
@@ -153,6 +153,6 @@ class UtrUniquenessTest extends TestCase
 
         $case = ReconciliationCase::query()->where('type', 'duplicate_utr')->sole();
         $this->assertSame($this->other->id, $case->branch_id);
-        $this->assertStringContainsString('already on a credit line of '.$this->branch->code, (string) $case->notes);
+        $this->assertStringContainsString('already on a credit line of '.$this->branch->name, (string) $case->notes);
     }
 }

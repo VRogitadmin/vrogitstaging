@@ -328,14 +328,15 @@ export default function Deposits(props: Props) {
                         >
                             <div className="flex items-start gap-2.5">
                                 <span className="grid size-9 flex-none place-items-center rounded-lg bg-acs text-xs font-semibold text-act">
-                                    {(txn.partner?.code ?? '').slice(0, 2)}
+                                    {(txn.partner?.name ?? '')
+                                        .split(/\s+/)
+                                        .slice(0, 2)
+                                        .map((word) => word[0]?.toUpperCase())
+                                        .join('')}
                                 </span>
                                 <div className="min-w-0 flex-1">
                                     <div className="truncate font-medium">
-                                        {txn.partner?.name}{' '}
-                                        <span className="font-mono text-xs text-tx3">
-                                            {txn.partner?.code}
-                                        </span>
+                                        {txn.partner?.name}
                                     </div>
                                 </div>
                                 <div className="flex flex-col items-end gap-1">
@@ -362,16 +363,7 @@ export default function Deposits(props: Props) {
                             </div>
                             <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs">
                                 <Row label="Branch">
-                                    {txn.branch ? (
-                                        <>
-                                            {txn.branch.name}{' '}
-                                            <span className="font-mono text-tx3">
-                                                {txn.branch.code}
-                                            </span>
-                                        </>
-                                    ) : (
-                                        '—'
-                                    )}
+                                    {txn.branch?.name ?? '—'}
                                 </Row>
                                 <Row label="Customer">
                                     {txn.customer?.name ??
@@ -477,13 +469,8 @@ export default function Deposits(props: Props) {
                                 key: 'partner',
                                 header: 'Partner',
                                 cell: (t: TxnRow) => (
-                                    <div>
-                                        <div className="font-medium">
-                                            {t.partner?.name}
-                                        </div>
-                                        <div className="font-mono text-xs text-tx3">
-                                            {t.partner?.code}
-                                        </div>
+                                    <div className="font-medium">
+                                        {t.partner?.name}
                                     </div>
                                 ),
                             },
@@ -492,13 +479,8 @@ export default function Deposits(props: Props) {
                                 header: 'Branch',
                                 cell: (t: TxnRow) =>
                                     t.branch ? (
-                                        <div>
-                                            <div className="font-medium">
-                                                {t.branch.name}
-                                            </div>
-                                            <div className="font-mono text-xs text-tx3">
-                                                {t.branch.code}
-                                            </div>
+                                        <div className="font-medium">
+                                            {t.branch.name}
                                         </div>
                                     ) : (
                                         '—'
@@ -757,10 +739,6 @@ function ApproveDialog({
         note: '',
     });
     const errors = form.errors as Record<string, string | undefined>;
-    const received = Math.round(
-        Number(form.data.received_amount.replace(/[,\s₹]/g, '')) * 100,
-    );
-    const differs = Number.isFinite(received) && received !== txn.amount;
     // The bank's UTR isn't the customer's: a note is required and Admin is told.
     const bankUtr = form.data.bank_utr
         .replace(/[^A-Za-z0-9]/g, '')
@@ -769,15 +747,15 @@ function ApproveDialog({
         txn.customer_utr !== null &&
         bankUtr !== '' &&
         bankUtr !== txn.customer_utr;
-    const noteRequired = differs || utrDiffers;
+    const noteRequired = utrDiffers;
 
     return (
         <FormDialog
             open
             onOpenChange={(open) => !open && onClose()}
-            title={`Approve ${formatPaise(differs && received > 0 ? received : txn.amount)}?`}
-            description={`${txn.reference} · ${txn.partner?.name ?? ''}. Enter the amount that actually reached your bank account. The partner is credited that amount immediately and this can’t be undone.`}
-            submitLabel={differs ? 'Approve amount received' : 'Approve'}
+            title={`Approve ${formatPaise(txn.amount)}?`}
+            description={`${txn.reference} · ${txn.partner?.name ?? ''}. The partner is credited this amount immediately and this can’t be undone.`}
+            submitLabel="Approve"
             processing={form.processing}
             onSubmit={() =>
                 form.post(url, { preserveScroll: true, onSuccess: onClose })
@@ -820,29 +798,16 @@ function ApproveDialog({
                 />
             </Field>
             <Field
-                label={`Amount received (₹) · order ${formatPaise(txn.amount)}`}
-                hint="Change it only if the customer paid a different amount."
+                label="Amount received (₹)"
                 error={errors.received_amount}
             >
                 <TextInput
-                    required
-                    inputMode="decimal"
-                    className="font-mono"
+                    readOnly
+                    tabIndex={-1}
+                    className="cursor-not-allowed bg-sf2 font-mono text-tx2"
                     value={form.data.received_amount}
-                    invalid={!!errors.received_amount}
-                    onChange={(event) =>
-                        form.setData('received_amount', event.target.value)
-                    }
                 />
             </Field>
-            {differs && received > 0 && (
-                <div className="rounded-lg bg-wnb px-3 py-2.5 text-[12.5px] text-wn">
-                    The customer paid {formatPaise(received)} instead of{' '}
-                    {formatPaise(txn.amount)}.{' '}
-                    {txn.partner?.name ?? 'The partner'} is credited{' '}
-                    {formatPaise(received)} and Admin is told.
-                </div>
-            )}
             {utrDiffers && (
                 <div className="rounded-lg bg-erb px-3 py-2.5 text-[12.5px] text-er">
                     This isn’t the customer’s UTR ({txn.customer_utr}). Approve
@@ -903,7 +868,7 @@ function MoveDialog({
             open
             onOpenChange={(open) => !open && onClose()}
             title={`Move ${txn.reference} to another branch?`}
-            description={`Now with ${txn.branch?.code ?? '—'}${txn.account ? ` · ${txn.account.label}` : ''}. Pick the account the customer’s money actually reached. The deposit goes back to Pending there, today’s capacity moves with it, and that branch is alerted.`}
+            description={`Now with ${txn.branch?.name ?? '—'}${txn.account ? ` · ${txn.account.label}` : ''}. Pick the account the customer’s money actually reached. The deposit goes back to Pending there, today’s capacity moves with it, and that branch is alerted.`}
             submitLabel="Move deposit"
             processing={form.processing}
             onSubmit={() =>
@@ -932,7 +897,7 @@ function MoveDialog({
                     {branches.map(({ branch, accounts }) => (
                         <optgroup
                             key={branch.id}
-                            label={`${branch.code} · ${branch.name}`}
+                            label={branch.name}
                         >
                             {accounts.map((account) => (
                                 <option key={account.id} value={account.id}>

@@ -113,7 +113,7 @@ export default function Reconciliation(props: Props) {
                       cell: (t: TxnRow) =>
                           t.branch && (
                               <span className="rounded-md bg-sf2 px-2 py-0.5 text-xs">
-                                  {t.branch.code}
+                                  {t.branch.name}
                               </span>
                           ),
                   },
@@ -200,10 +200,7 @@ export default function Reconciliation(props: Props) {
                             href={cases.index().url}
                             className="inline-flex h-8 items-center rounded-[7px] border border-ln bg-sf px-3 text-[13px] font-medium"
                         >
-                            {portal === 'admin'
-                                ? 'Unsettled UTR'
-                                : 'Deposit Unsettled'}{' '}
-                            · {props.open_cases}
+                            Unsettled UTR · {props.open_cases}
                         </Link>
                     </>
                 }
@@ -270,7 +267,7 @@ export default function Reconciliation(props: Props) {
                             <option value="">All branches</option>
                             {branches.map((branch) => (
                                 <option key={branch.id} value={branch.id}>
-                                    {branch.code} · {branch.name}
+                                    {branch.name}
                                 </option>
                             ))}
                         </SelectInput>

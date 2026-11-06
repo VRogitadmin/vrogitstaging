@@ -1,8 +1,6 @@
 import type { InertiaLinkProps } from '@inertiajs/react';
 import {
-    ArrowLeftRight,
     Code,
-    CreditCard,
     FileText,
     GitCompareArrows,
     History,
@@ -10,7 +8,6 @@ import {
     LayoutDashboard,
     Network,
     Settings,
-    ShieldCheck,
     User,
     Wallet,
 } from 'lucide-react';
@@ -72,9 +69,17 @@ export type NavLink = {
 
 /**
  * A group with one item shows as a single link (e.g. Dashboard); larger
- * groups fold open under their heading.
+ * groups fold open under their heading. `id` tells apart groups that share
+ * a label (the statements group and Profile & settings are both "Account").
  */
-export type NavGroup = { label: string; icon: LucideIcon; items: NavLink[] };
+export type NavGroup = {
+    id?: string;
+    label: string;
+    icon: LucideIcon;
+    items: NavLink[];
+};
+
+export const navGroupId = (group: NavGroup): string => group.id ?? group.label;
 
 export const PORTAL_LABELS: Record<UserType, string> = {
     admin: 'Admin',
@@ -168,7 +173,8 @@ export const PORTAL_NAV: Record<UserType, NavGroup[]> = {
             ],
         },
         {
-            label: 'Reconciliation',
+            id: 'reconciliation',
+            label: 'Account',
             icon: GitCompareArrows,
             items: [
                 {
@@ -219,9 +225,30 @@ export const PORTAL_NAV: Record<UserType, NavGroup[]> = {
                     href: admin.commissions.index(),
                     permission: 'commissions.view',
                 },
+            ],
+        },
+        {
+            label: 'Reports',
+            icon: FileText,
+            items: [
                 {
-                    label: 'Reports',
-                    href: admin.reports.index(),
+                    label: 'Branch Deposit Report',
+                    href: admin.reports.show({ report: 'branch_deposits' }),
+                    permission: 'reports.view',
+                },
+                {
+                    label: 'Partner Deposit Report',
+                    href: admin.reports.show({ report: 'partner_deposits' }),
+                    permission: 'reports.view',
+                },
+                {
+                    label: 'Branch Withdrawal Report',
+                    href: admin.reports.show({ report: 'branch_withdrawals' }),
+                    permission: 'reports.view',
+                },
+                {
+                    label: 'Partner Withdrawal Report',
+                    href: admin.reports.show({ report: 'partner_withdrawals' }),
                     permission: 'reports.view',
                 },
             ],
@@ -257,6 +284,19 @@ export const PORTAL_NAV: Record<UserType, NavGroup[]> = {
                 },
             ],
         },
+        {
+            // Hidden from admins until a super admin opens it in Section
+            // rollout (super admins also get the UI kit here).
+            label: 'Developer',
+            icon: Code,
+            items: [
+                {
+                    label: 'Partner API Docs',
+                    href: admin.partnerApiDocs.show(),
+                    permission: 'partners.view',
+                },
+            ],
+        },
         account,
     ],
     branch: [
@@ -266,8 +306,8 @@ export const PORTAL_NAV: Record<UserType, NavGroup[]> = {
             items: [{ label: 'Dashboard', href: branch.dashboard() }],
         },
         {
-            label: 'Accounts',
-            icon: CreditCard,
+            label: 'Network',
+            icon: Network,
             items: [
                 {
                     label: 'Bank & UPI Accounts',
@@ -277,8 +317,8 @@ export const PORTAL_NAV: Record<UserType, NavGroup[]> = {
             ],
         },
         {
-            label: 'Operations',
-            icon: ArrowLeftRight,
+            label: 'Payments',
+            icon: Wallet,
             items: [
                 {
                     label: 'Manual Deposit',
@@ -291,18 +331,19 @@ export const PORTAL_NAV: Record<UserType, NavGroup[]> = {
                     permission: 'payouts.view',
                 },
                 {
-                    label: 'Deposit Unsettled',
+                    label: 'Unsettled UTR',
                     href: branchCases.index(),
                     permission: 'reconciliation.view',
                 },
             ],
         },
         {
-            label: 'Statements',
-            icon: FileText,
+            id: 'reconciliation',
+            label: 'Account',
+            icon: GitCompareArrows,
             items: [
                 {
-                    label: 'A/C Statement Entry',
+                    label: 'Manual A/C Statement',
                     href: branchStatements.index(),
                     permission: 'statements.view',
                 },
@@ -364,16 +405,27 @@ export const PORTAL_NAV: Record<UserType, NavGroup[]> = {
                     href: branch.settlementDashboard(),
                     permission: 'settlements.view',
                 },
+            ],
+        },
+        {
+            label: 'Reports',
+            icon: FileText,
+            items: [
                 {
-                    label: 'Reports',
-                    href: branch.reports.index(),
+                    label: 'Branch Deposit Report',
+                    href: branch.reports.show({ report: 'branch_deposits' }),
+                    permission: 'reports.view',
+                },
+                {
+                    label: 'Branch Withdrawal Report',
+                    href: branch.reports.show({ report: 'branch_withdrawals' }),
                     permission: 'reports.view',
                 },
             ],
         },
         {
-            label: 'Admin',
-            icon: ShieldCheck,
+            label: 'System',
+            icon: Settings,
             items: [
                 {
                     label: 'Users',
@@ -424,8 +476,8 @@ export const PORTAL_NAV: Record<UserType, NavGroup[]> = {
             ],
         },
         {
-            label: 'Accounts',
-            icon: CreditCard,
+            label: 'Network',
+            icon: Network,
             items: [
                 {
                     label: 'Bank & UPI Accounts',
@@ -439,7 +491,7 @@ export const PORTAL_NAV: Record<UserType, NavGroup[]> = {
             icon: Landmark,
             items: [
                 {
-                    label: 'Settlements',
+                    label: 'Settlement',
                     href: partnerSettlements.index(),
                     permission: 'settlements.view',
                 },
@@ -453,9 +505,22 @@ export const PORTAL_NAV: Record<UserType, NavGroup[]> = {
                     href: partnerBalance(),
                     permission: 'balances.view',
                 },
+            ],
+        },
+        {
+            label: 'Reports',
+            icon: FileText,
+            items: [
                 {
-                    label: 'Reports',
-                    href: partner.reports.index(),
+                    label: 'Partner Deposit Report',
+                    href: partner.reports.show({ report: 'partner_deposits' }),
+                    permission: 'reports.view',
+                },
+                {
+                    label: 'Partner Withdrawal Report',
+                    href: partner.reports.show({
+                        report: 'partner_withdrawals',
+                    }),
                     permission: 'reports.view',
                 },
             ],
@@ -482,8 +547,8 @@ export const PORTAL_NAV: Record<UserType, NavGroup[]> = {
             ],
         },
         {
-            label: 'Admin',
-            icon: ShieldCheck,
+            label: 'System',
+            icon: Settings,
             items: [
                 {
                     label: 'Users',

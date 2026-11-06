@@ -8,6 +8,7 @@ use App\Domain\Core\Identity\Models\User;
 use App\Domain\Core\Rbac\SystemRoles;
 use App\Domain\Ledger\Ledger;
 use App\Domain\PaymentAccount\Models\PaymentAccount;
+use App\Domain\Platform\Settings;
 use App\Domain\Payout\Models\PayoutPayment;
 use App\Domain\Reconciliation\Models\ReconciliationCase;
 use App\Domain\Reconciliation\Models\StatementEntry;
@@ -148,6 +149,38 @@ class StatementMatchingTest extends TestCase
         $this->actingAs($this->owner)->get(route('branch.statements.index', ['match' => 'none']))->assertInertia(fn ($page) => $page->has('items.data', 0));
     }
 
+    public function test_a_deposit_declined_for_the_wrong_amount_leaves_its_line_waiting_for_the_right_one()
+    {
+        $payin = $this->submittedPayin(['amount' => 100000]);
+        $this->addLine()->assertSessionHasNoErrors(); // the bank shows ₹5,000
+        $case = ReconciliationCase::sole();
+        $this->assertSame('amount_mismatch', $case->type->value);
+
+        $this->actingAs($this->operator)->post(route('branch.deposits.decline', $payin), ['reason_code' => 'wrong_amount', 'note' => 'Bank shows 5000'])
+            ->assertSessionHasNoErrors();
+
+        // The deposit is declined; the bank line stays unsettled, saying why.
+        $this->assertSame('rejected', $payin->refresh()->status);
+        $line = $this->line();
+        $this->assertSame('unmatched', $line->status);
+        $this->assertSame('open', $case->refresh()->status);
+        $this->assertSame('amount_mismatch', $case->type->value);
+        $this->assertStringContainsString('was declined', (string) $case->notes);
+        $this->actingAs($this->admin)->get(route('admin.statements.index'))
+            ->assertInertia(fn ($page) => $page->where('items.data.0.display', 'unsettled')->where('items.data.0.case.type', 'amount_mismatch'));
+
+        // The customer submits the same UTR on a deposit of what the bank
+        // shows: the same line links and the deposit is approved.
+        app(Settings::class)->set(Settings::AUTO_APPROVE_DEPOSITS, true, $this->networkAdmin);
+        $again = $this->submittedPayin(['amount' => 500000]);
+
+        $this->assertSame('success', $again->refresh()->status);
+        $this->assertSame($again->id, $line->refresh()->transaction_id);
+        $this->assertSame('reconciled', $line->status);
+        $this->assertSame('resolved', $case->refresh()->status);
+        $this->assertSame(1, StatementEntry::count());
+    }
+
     public function test_approving_a_short_payment_for_the_amount_received_closes_its_amount_mismatch_case()
     {
         $payin = $this->submittedPayin(['amount' => 500000]);
@@ -222,7 +255,7 @@ class StatementMatchingTest extends TestCase
         $case = ReconciliationCase::sole();
         $this->assertSame('utr_not_found', $case->type->value);
 
-        $this->post("http://pay.a27pay.local/p/{$token}/proof", ['utr' => '6268 1282 0491'])->assertSessionHasNoErrors();
+        $this->postProof($token, '6268 1282 0491')->assertSessionHasNoErrors();
 
         $payin = Transaction::where('reference', $reference)->firstOrFail();
         $this->assertSame('matched', $this->line()->status);
@@ -456,7 +489,7 @@ class StatementMatchingTest extends TestCase
             ->assertInertia(fn ($page) => $page->where('transactions.data.0.bank_line.utr', '626812820491'));
         $this->partial($this->admin, route('admin.transactions.index', ['txn' => $payin->id]), 'transactions/index', 'detail')
             ->assertJsonPath('props.detail.reconciliation.line.utr', '626812820491')
-            ->assertJsonPath('props.detail.reconciliation.transaction_branch', $this->branch->code);
+            ->assertJsonPath('props.detail.reconciliation.transaction_branch', $this->branch->name);
 
         $this->actingAs($partnerUser)->get(route('partner.payins.index'))
             ->assertInertia(fn ($page) => $page->where('transactions.data.0.bank_line', null));

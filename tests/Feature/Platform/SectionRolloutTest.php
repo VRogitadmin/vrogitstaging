@@ -69,7 +69,7 @@ class SectionRolloutTest extends TestCase
         $this->actingAs($this->ops)->get(route('admin.dashboard'))->assertOk();
         $this->actingAs($this->ops)->get(route('profile.edit'))->assertOk();
 
-        // Branch: Statement History open while A/C Statement Entry (its parent path) is closed.
+        // Branch: Statement History open while Manual A/C Statement (its parent path) is closed.
         $owner = User::factory()->branch(SystemRoles::BRANCH_OWNER)->withTwoFactor()->create();
         $this->actingAs($owner)->get(route('branch.statement-imports.index'))->assertOk();
         $this->actingAs($owner)->get(route('branch.statements.index'))->assertRedirect(route('branch.dashboard'));
@@ -85,6 +85,27 @@ class SectionRolloutTest extends TestCase
         // Rollout off: everyone sees everything again.
         $this->rollout(false, ['admin' => ['partners']]);
         $this->actingAs($this->ops)->get(route('admin.branches.index'))->assertOk();
+    }
+
+    public function test_partner_api_docs_stay_hidden_from_admins_until_a_super_admin_opens_them()
+    {
+        // Rollout off, nothing opened: hidden and refused for admins, open for super admins.
+        $this->actingAs($this->ops)->get(route('admin.dashboard'))
+            ->assertInertia(fn ($page) => $page->where('rolloutHidden', ['/admin/partner-api-docs']));
+        $this->actingAs($this->ops)->get(route('admin.partner-api-docs.show'))->assertRedirect(route('admin.dashboard'));
+        $this->actingAs($this->ops)->get(route('admin.partner-api-docs.download'))->assertRedirect(route('admin.dashboard'));
+        $this->actingAs($this->super)->get(route('admin.partner-api-docs.show'))->assertOk();
+
+        // Opened, rollout still off: the menu item shows and the guide opens and downloads.
+        $this->rollout(false, ['admin' => ['partner_api_docs']])->assertSessionHasNoErrors();
+        $this->actingAs($this->ops)->get(route('admin.dashboard'))
+            ->assertInertia(fn ($page) => $page->where('rolloutHidden', []));
+        $this->actingAs($this->ops)->get(route('admin.partner-api-docs.show'))
+            ->assertInertia(fn ($page) => $page->component('admin/partner-api-docs'));
+        $this->actingAs($this->ops)->get(route('admin.partner-api-docs.preview'))
+            ->assertOk()->assertSee('Standard guide')->assertDontSee('No key yet');
+        $this->actingAs($this->ops)->get(route('admin.partner-api-docs.download'))
+            ->assertOk()->assertHeader('Content-Type', 'application/pdf');
     }
 
     public function test_every_section_link_is_a_real_page()

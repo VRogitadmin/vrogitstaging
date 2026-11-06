@@ -68,9 +68,20 @@ const METHOD_INFO: Record<
 };
 
 /**
+ * Logos under the QR code (public/images/checkout/upi), each at its own
+ * width so none is stretched.
+ */
+const UPI_LOGOS: [string, string][] = [
+    ['upi', 'UPI'],
+    ['gpay', 'Google Pay'],
+    ['phonepe', 'PhonePe'],
+    ['paytm', 'Paytm'],
+];
+
+/**
  * The customer's payment page (design: checkout). States: choose a method →
- * pay (UPI / bank / QR) and submit UTR or screenshot → verifying → success;
- * or failed / expired / unavailable.
+ * pay (UPI / bank / QR) and submit the UTR and a screenshot → verifying →
+ * success; or failed / expired / unavailable.
  */
 export default function Checkout(props: Props) {
     const { partner, payin, account } = props;
@@ -103,27 +114,17 @@ export default function Checkout(props: Props) {
         >
             <Head title={`Pay ${partner.name}`} />
             <div className="flex w-full max-w-[420px] flex-col overflow-hidden bg-white text-[14px] text-[#0F172A] sm:rounded-[28px] sm:border sm:border-[#E4E7EC] sm:shadow-[0_30px_80px_rgba(15,23,42,.14)]">
-                <header className="flex items-center gap-2.5 border-b border-[#EEF0F3] px-5 py-3.5">
-                    <div className="grid size-9 place-items-center rounded-[10px] bg-ac text-[13px] font-bold text-white">
-                        {partner.initials}
-                    </div>
-                    <div className="flex-1">
-                        <div className="font-semibold">{partner.name}</div>
-                        <div className="flex items-center gap-1.5 text-xs text-[#64748B]">
-                            <ShieldCheck className="size-3.5 text-[#047857]" />{' '}
-                            Secure payment
+                <header className="flex items-center gap-3 border-b border-[#EEF0F3] px-5 py-3.5">
+                    <ShieldCheck className="size-7 flex-none text-[#047857]" />
+                    <div className="min-w-0 flex-1">
+                        <div className="text-[15px] font-semibold">
+                            Secure Checkout
+                        </div>
+                        <div className="text-xs text-[#64748B]">
+                            Complete payment within session time
                         </div>
                     </div>
                 </header>
-
-                {payin.customer_name && (
-                    <div className="border-b border-[#EEF0F3] bg-[#F8FAFC] px-5 py-2 text-xs text-[#475569]">
-                        Paying from{' '}
-                        <b className="font-semibold text-[#0F172A]">
-                            {payin.customer_name}
-                        </b>
-                    </div>
-                )}
 
                 {(open || waiting) && <AmountCard {...props} ticking={open} />}
 
@@ -131,6 +132,7 @@ export default function Checkout(props: Props) {
                     {open && choosing && (
                         <ChooseMethod
                             {...props}
+                            onChosen={() => setChoosing(false)}
                             onCancel={
                                 account ? () => setChoosing(false) : undefined
                             }
@@ -342,12 +344,12 @@ function AmountCard({
     const urgent = left !== null && left < 120;
 
     return (
-        <div className="mx-5 mt-4 rounded-[14px] border border-[#EEF0F3] bg-[#F8FAFC] p-4">
+        <div className="mx-5 mt-4 rounded-[14px] border border-[#EEF0F3] bg-[#F8FAFC] px-4 py-3">
             <div className="text-xs text-[#64748B]">Amount to pay</div>
-            <div className="mt-0.5 text-[30px] font-bold tracking-[-.02em]">
+            <div className="mt-0.5 text-[30px] leading-tight font-bold tracking-[-.02em]">
                 {formatPaise(payin.amount)}
             </div>
-            <div className="mt-2 flex items-center justify-between text-xs text-[#475569]">
+            <div className="mt-1.5 flex items-center justify-between text-xs text-[#475569]">
                 <span>
                     Order <span className="font-mono">{payin.order_id}</span>
                 </span>
@@ -365,7 +367,7 @@ function AmountCard({
                 )}
             </div>
             {ticking && left !== null && (
-                <div className="mt-2 h-1 overflow-hidden rounded-full bg-[#E4E7EC]">
+                <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-[#E4E7EC]">
                     <div
                         className={cn(
                             'h-full',
@@ -385,14 +387,21 @@ function ChooseMethod({
     token,
     methods,
     payin,
+    onChosen,
     onCancel,
-}: Props & { onCancel?: () => void }) {
+}: Props & { onChosen: () => void; onCancel?: () => void }) {
     const form = useForm({ method: '' as string });
     const error = (usePage().props.errors as Record<string, string>).method;
 
+    // Close the list on success even when the account stays the same (the
+    // method switches on the same account, or the same method is picked
+    // again), so the props don't change.
     const choose = (method: Method) => {
         form.transform(() => ({ method }));
-        form.post(checkout.method(token).url, { preserveScroll: true });
+        form.post(checkout.method(token).url, {
+            preserveScroll: true,
+            onSuccess: onChosen,
+        });
     };
 
     return (
@@ -495,32 +504,32 @@ function PayView({
 
             {current === 'bank_transfer' && account!.account_number && (
                 <>
-                    <div className="overflow-hidden rounded-[14px] border border-[#E4E7EC]">
-                        <CopyRow
+                    <div className="rounded-[14px] border border-[#E4E7EC] px-4 pt-3.5 pb-1">
+                        <div className="text-[15px] font-medium">
+                            Bank Account Details
+                        </div>
+                        <DetailRow
                             label="Bank name"
                             value={account!.bank_name ?? ''}
-                            copyable={false}
+                            upper
                         />
-                        <CopyRow
-                            label="Account holder"
+                        <DetailRow
+                            label="Holder name"
                             value={account!.holder ?? ''}
-                            copyable={false}
+                            upper
                         />
-                        <CopyRow
-                            label="Account number"
+                        <DetailRow
+                            label="Account no"
                             value={account!.account_number}
-                            mono
                         />
-                        <CopyRow
-                            label="IFSC"
+                        <DetailRow
+                            label="IFSC code"
                             value={account!.ifsc ?? ''}
-                            mono
+                            upper
                         />
-                        <CopyRow
-                            label="Amount"
-                            value={formatPaise(payin.amount)}
-                            copyValue={(payin.amount / 100).toFixed(2)}
-                        />
+                        {account!.upi_id && (
+                            <DetailRow label="UPI ID" value={account!.upi_id} />
+                        )}
                     </div>
                     <Note>
                         Transfer the <b>exact amount</b> by IMPS / NEFT from
@@ -532,6 +541,7 @@ function PayView({
 
             {current === 'upi' && account!.upi_id && (
                 <>
+                    <YonoWarning />
                     <div className="overflow-hidden rounded-[14px] border border-[#E4E7EC]">
                         <CopyRow
                             label="Pay to UPI ID"
@@ -558,15 +568,31 @@ function PayView({
             )}
 
             {current === 'qr' && account!.qr_svg && (
-                <div className="flex flex-col items-center gap-2 rounded-[14px] border border-[#E4E7EC] p-4">
-                    <div
-                        className="size-[220px] [&_svg]:size-full"
-                        dangerouslySetInnerHTML={{ __html: account!.qr_svg }}
-                    />
-                    <div className="text-center text-xs text-[#64748B]">
-                        Scan with any UPI app. The amount is filled in for you.
+                <>
+                    <YonoWarning />
+                    <div className="flex flex-col items-center gap-2 rounded-[14px] border border-[#E4E7EC] p-4">
+                        <div
+                            className="size-[220px] [&_svg]:size-full"
+                            dangerouslySetInnerHTML={{
+                                __html: account!.qr_svg,
+                            }}
+                        />
+                        <div className="text-center text-xs text-[#64748B]">
+                            Scan with any UPI app. The amount is filled in for
+                            you.
+                        </div>
+                        <div className="flex items-center gap-4">
+                            {UPI_LOGOS.map(([file, name]) => (
+                                <img
+                                    key={file}
+                                    src={`/images/checkout/upi/${file}.png`}
+                                    alt={name}
+                                    className="h-8 w-auto"
+                                />
+                            ))}
+                        </div>
                     </div>
-                </div>
+                </>
             )}
 
             <ChangeDetails token={token} />
@@ -584,11 +610,13 @@ function PayView({
                 <label className="flex flex-col gap-1.5 text-[13px] font-medium">
                     <span>
                         UTR / reference number{' '}
+                        <span className="text-[#B91C1C]">*</span>{' '}
                         <span className="font-normal text-[#64748B]">
                             (from your bank or UPI app)
                         </span>
                     </span>
                     <input
+                        required
                         inputMode="text"
                         autoComplete="off"
                         placeholder="e.g. 626812820491"
@@ -602,9 +630,14 @@ function PayView({
                 <label className="flex cursor-pointer items-center gap-2.5 rounded-xl border border-dashed border-[#CBD5E1] px-3 py-2.5 text-[13px] text-[#475569] hover:border-ac">
                     <ImageUp className="size-4 flex-none" />
                     <span className="flex-1 truncate">
-                        {form.data.photo
-                            ? form.data.photo.name
-                            : 'Or upload a screenshot of the payment'}
+                        {form.data.photo ? (
+                            form.data.photo.name
+                        ) : (
+                            <>
+                                Upload a screenshot of the payment{' '}
+                                <span className="text-[#B91C1C]">*</span>
+                            </>
+                        )}
                     </span>
                     {form.data.photo && (
                         <button
@@ -619,7 +652,8 @@ function PayView({
                     )}
                     <input
                         type="file"
-                        className="hidden"
+                        required
+                        className="sr-only"
                         accept={proof.types.map((type) => `.${type}`).join(',')}
                         onChange={(event) =>
                             form.setData(
@@ -638,8 +672,8 @@ function PayView({
                     type="submit"
                     disabled={
                         form.processing ||
-                        (form.data.utr.trim() === '' &&
-                            form.data.photo === null)
+                        form.data.utr.trim() === '' ||
+                        form.data.photo === null
                     }
                     className="h-12 rounded-xl bg-brand text-[15px] font-semibold text-white disabled:opacity-50"
                 >
@@ -653,6 +687,7 @@ function PayView({
             >
                 ← Choose another method
             </button>
+            <PaymentRules />
         </>
     );
 }
@@ -683,9 +718,9 @@ function ChangeDetails({ token }: { token: string }) {
                 <button
                     type="button"
                     onClick={() => setConfirming(true)}
-                    className="inline-flex h-10 items-center justify-center gap-2 rounded-xl border border-[#E4E7EC] text-[13px] font-medium text-[#475569] hover:border-ac"
+                    className="inline-flex h-10 items-center justify-center gap-2 rounded-xl border border-ac bg-brand text-[13px] font-semibold text-white transition-colors hover:bg-acs hover:bg-none hover:text-act hover:shadow-none"
                 >
-                    <RefreshCw className="size-3.5" />
+                    <RefreshCw className="size-4" />
                     Having trouble paying? Get different details
                 </button>
             </>
@@ -772,6 +807,97 @@ function CopyRow({
                     {copied === target ? 'Copied' : 'Copy'}
                 </button>
             )}
+        </div>
+    );
+}
+
+/**
+ * One line of Bank Account Details (bank transfer tab): label on the left,
+ * the value and a copy icon on the right.
+ */
+function DetailRow({
+    label,
+    value,
+    upper,
+}: {
+    label: string;
+    value: string;
+    upper?: boolean;
+}) {
+    const [copied, copy] = useClipboard();
+
+    return (
+        <div className="flex items-center gap-3 border-b border-[#EEF0F3] py-3 last:border-b-0">
+            <span className="flex-none text-[12.5px] font-semibold text-[#64748B] uppercase">
+                {label}
+            </span>
+            <span
+                className={cn(
+                    'min-w-0 flex-1 text-right text-[14px] font-semibold break-all',
+                    upper && 'uppercase',
+                )}
+            >
+                {value}
+            </span>
+            <button
+                type="button"
+                onClick={() => copy(value)}
+                aria-label={`Copy ${label}`}
+                title={copied === value ? 'Copied' : `Copy ${label}`}
+                className="grid size-7 flex-none place-items-center rounded-md text-[#16A34A] hover:bg-[#F0FDF4]"
+            >
+                {copied === value ? (
+                    <Check className="size-[18px]" />
+                ) : (
+                    <Copy className="size-[18px]" />
+                )}
+            </button>
+        </div>
+    );
+}
+
+/**
+ * UPI payments from Yono SBI may fail, so the UPI and QR code tabs ask the
+ * payer, in English and Hindi, to use another app. The image keeps the
+ * box's background colour.
+ */
+function YonoWarning() {
+    return (
+        <div className="flex items-center gap-3 rounded-xl border border-[#F5E6A8] bg-[#FDFBED] px-3 py-2.5 text-[#B45F2A]">
+            <img
+                src="/images/checkout/no-yono-sbi.png"
+                alt="Yono SBI crossed out"
+                className="size-16 flex-none"
+            />
+            <div className="flex flex-col gap-1 text-[12.5px] leading-snug">
+                <b className="text-[13px] tracking-wide">WARNING :</b>
+                <span>
+                    Please do not use Yono SBI for UPI payments, as the payment
+                    may fail.
+                </span>
+                <span lang="hi">
+                    कृपया UPI भुगतान के लिए Yono SBI का उपयोग न करें, क्योंकि
+                    भुगतान असफल हो सकता है।
+                </span>
+            </div>
+        </div>
+    );
+}
+
+/** The bottom of the payment step: the two rules that cost payers money. */
+function PaymentRules() {
+    return (
+        <div className="flex flex-col gap-1 rounded-xl border border-[#F5E6A8] bg-[#FDFBED] px-3 py-2.5 text-[12.5px] leading-snug text-[#B45F2A]">
+            <span>
+                - Do not send a different amount than what is in the deposit
+                request.
+            </span>
+            <span>
+                - Do not save the details of our collection account, such as
+                the UPI ID or QR code for the next payment. We frequently update
+                our collection accounts and using old details may result in
+                money loss.
+            </span>
         </div>
     );
 }
