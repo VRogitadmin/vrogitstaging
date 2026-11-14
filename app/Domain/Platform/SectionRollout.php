@@ -15,8 +15,8 @@ use App\Domain\Core\Identity\Models\User;
  * A closed item disappears from the menu and its pages are refused
  * (EnforceSectionRollout). Each item owns the URL paths under it; a path
  * belongs to the item with the longest matching path, so "Statement
- * History" (/branch/statements/imports) can be open while "Manual A/C
- * Statement" (/branch/statements) is closed. Dashboards and Profile & settings
+ * History" (/branch/statements/imports) can be open while "Manual
+ * Entry" (/branch/statements) is closed. Dashboards and Profile & settings
  * are always open. The first path of each item is its menu link.
  *
  * A gated item (Developer › Partner API Docs) stays closed to everyone but
@@ -35,18 +35,27 @@ class SectionRollout
      */
     public const SECTIONS = [
         'admin' => [
-            'Payments' => [
-                'transactions' => ['label' => 'Transactions', 'paths' => ['/admin/transactions', '/admin/webhooks']],
+            'Bank & UPI Accounts' => [
+                'accounts' => ['label' => 'Bank & UPI Accounts', 'paths' => ['/admin/accounts']],
+            ],
+            // Payments › Deposit and › Withdrawal are pages of tabs (PaymentHub);
+            // each tab stays its own item here, so it opens on its own.
+            'Payments › Deposit' => [
+                'transactions' => ['label' => 'All deposits (Transactions)', 'paths' => ['/admin/transactions', '/admin/webhooks']],
                 'deposits' => ['label' => 'Manual Deposit', 'paths' => ['/admin/deposits']],
+                'statements' => ['label' => 'Manual Entry', 'paths' => ['/admin/statements']],
+                'unsettled' => ['label' => 'Unsettled UTR', 'paths' => ['/admin/unsettled']],
+                'utr' => ['label' => 'UTR Reconciliation (Deposit and Withdrawal)', 'paths' => ['/admin/utr-reconciliation']],
+            ],
+            'Payments › Withdrawal' => [
+                // Longer than /admin/transactions, so it is this item's (added 2026-11-09).
+                'payout_transactions' => ['label' => 'All withdrawals (Transactions › Payouts)', 'paths' => ['/admin/transactions/payouts']],
                 'payouts' => ['label' => 'Manual Payout', 'paths' => ['/admin/payouts']],
+            ],
+            'Payments' => [
                 'refunds' => ['label' => 'Refunds', 'paths' => ['/admin/refunds', '/admin/reversals']],
                 'chargebacks' => ['label' => 'Chargebacks', 'paths' => ['/admin/chargebacks']],
                 'payout_returns' => ['label' => 'Payout returns', 'paths' => ['/admin/payout-returns']],
-            ],
-            'Account' => [
-                'statements' => ['label' => 'Manual A/C Statement', 'paths' => ['/admin/statements']],
-                'utr' => ['label' => 'UTR Reconciliation', 'paths' => ['/admin/utr-reconciliation']],
-                'unsettled' => ['label' => 'Unsettled UTR', 'paths' => ['/admin/unsettled']],
             ],
             'Network' => [
                 'partners' => ['label' => 'Partners', 'paths' => ['/admin/partners']],
@@ -54,7 +63,6 @@ class SectionRollout
                 'partner_branches' => ['label' => 'Partner → branches', 'paths' => ['/admin/mappings/by-partner']],
                 'branch_partners' => ['label' => 'Branch → partners', 'paths' => ['/admin/mappings/by-branch']],
                 'mappings' => ['label' => 'Branch mapping', 'paths' => ['/admin/mappings']],
-                'accounts' => ['label' => 'Bank & UPI Accounts', 'paths' => ['/admin/accounts']],
             ],
             'Finance' => [
                 'settlements' => ['label' => 'Settlement', 'paths' => ['/admin/settlements']],
@@ -77,30 +85,29 @@ class SectionRollout
             ],
         ],
         'branch' => [
-            'Network' => [
+            'Bank & UPI Accounts' => [
                 'accounts' => ['label' => 'Bank & UPI Accounts', 'paths' => ['/branch/accounts']],
             ],
-            'Payments' => [
+            'Payments › Deposit' => [
+                'payins' => ['label' => 'All deposits (Pay-in History)', 'paths' => ['/branch/payins']],
                 'deposits' => ['label' => 'Manual Deposit', 'paths' => ['/branch/deposits']],
-                'payouts' => ['label' => 'Manual Payout', 'paths' => ['/branch/payouts']],
+                'statements' => ['label' => 'Manual Entry', 'paths' => ['/branch/statements']],
                 'unsettled' => ['label' => 'Unsettled UTR', 'paths' => ['/branch/unsettled']],
+                'utr' => ['label' => 'UTR Reconciliation (Deposit and Withdrawal)', 'paths' => ['/branch/utr-reconciliation']],
+            ],
+            'Payments › Withdrawal' => [
+                'payout_history' => ['label' => 'All withdrawals (Pay-out History)', 'paths' => ['/branch/payout-history']],
+                'payouts' => ['label' => 'Manual Payout', 'paths' => ['/branch/payouts']],
+            ],
+            'Payments' => [
+                'chargebacks' => ['label' => 'Chargebacks', 'paths' => ['/branch/chargebacks']],
+                'payout_returns' => ['label' => 'Payout returns', 'paths' => ['/branch/payout-returns']],
             ],
             'Account' => [
-                'statements' => ['label' => 'Manual A/C Statement', 'paths' => ['/branch/statements']],
                 'imports' => ['label' => 'Statement History', 'paths' => ['/branch/statements/imports']],
             ],
-            'History' => [
-                'payins' => ['label' => 'Pay-in History', 'paths' => ['/branch/payins']],
-                'chargebacks' => ['label' => 'Chargebacks', 'paths' => ['/branch/chargebacks']],
-                'payout_history' => ['label' => 'Pay-out History', 'paths' => ['/branch/payout-history']],
-                'payout_returns' => ['label' => 'Payout returns', 'paths' => ['/branch/payout-returns']],
-                'utr' => ['label' => 'UTR Reconciliation', 'paths' => ['/branch/utr-reconciliation']],
-            ],
             'Finance' => [
-                'balance' => ['label' => 'Branch Balance', 'paths' => ['/branch/balance']],
-                'settlements' => ['label' => 'Settlement', 'paths' => ['/branch/settlements']],
-                'settlement_dashboard' => ['label' => 'Settlement Dashboard', 'paths' => ['/branch/settlement-dashboard']],
-                'reports' => ['label' => 'Reports', 'paths' => ['/branch/reports']],
+                'settlement_dashboard' => ['label' => 'Branch Settlement Dashboard', 'paths' => ['/branch/settlement-dashboard']],
             ],
             'System' => [
                 'users' => ['label' => 'Users', 'paths' => ['/branch/users']],
@@ -108,20 +115,17 @@ class SectionRollout
             ],
         ],
         'partner' => [
-            'Payments' => [
-                'payins' => ['label' => 'Pay-in', 'paths' => ['/partner/payins', '/partner/webhooks']],
-                'chargebacks' => ['label' => 'Chargebacks', 'paths' => ['/partner/chargebacks']],
-                'payouts' => ['label' => 'Pay-out', 'paths' => ['/partner/payouts']],
-                'payout_returns' => ['label' => 'Payout returns', 'paths' => ['/partner/payout-returns']],
-            ],
-            'Network' => [
+            'Bank & UPI Accounts' => [
                 'accounts' => ['label' => 'Bank & UPI Accounts', 'paths' => ['/partner/accounts']],
             ],
+            'Payments' => [
+                'payins' => ['label' => 'Deposit', 'paths' => ['/partner/payins', '/partner/webhooks']],
+                'payouts' => ['label' => 'Withdrawal', 'paths' => ['/partner/payouts']],
+                'chargebacks' => ['label' => 'Chargebacks', 'paths' => ['/partner/chargebacks']],
+                'payout_returns' => ['label' => 'Payout returns', 'paths' => ['/partner/payout-returns']],
+            ],
             'Finance' => [
-                'settlements' => ['label' => 'Settlement', 'paths' => ['/partner/settlements']],
-                'settlement_dashboard' => ['label' => 'Settlement Dashboard', 'paths' => ['/partner/settlement-dashboard']],
-                'balance' => ['label' => 'Balance', 'paths' => ['/partner/balance']],
-                'reports' => ['label' => 'Reports', 'paths' => ['/partner/reports']],
+                'settlement_dashboard' => ['label' => 'Partner Settlement Dashboard', 'paths' => ['/partner/settlement-dashboard']],
             ],
             'Developers' => [
                 'developers' => ['label' => 'API & Webhooks', 'paths' => ['/partner/developers']],
@@ -137,6 +141,29 @@ class SectionRollout
         ],
     ];
 
+    /**
+     * Pages taken out of the branch and partner portals (client request
+     * 2026-11-14: Finance shows only the settlement dashboard, no Reports).
+     * Closed to everyone, whatever rollout says; the code stays so a page
+     * can come back by removing it here and listing it in SECTIONS and
+     * portal-nav.ts.
+     *
+     * @var array<string, list<string>>
+     */
+    public const RETIRED = [
+        'branch' => ['/branch/balance', '/branch/settlements', '/branch/reports'],
+        'partner' => ['/partner/balance', '/partner/settlements', '/partner/reports'],
+    ];
+
+    /**
+     * Items split off an existing one: open wherever the old item was open,
+     * until a super admin saves the rollout again (the saved value then has
+     * `version` 2 and lists them itself).
+     */
+    private const SPLIT_FROM = [
+        'admin' => ['payout_transactions' => 'transactions'],
+    ];
+
     public function __construct(private Settings $settings) {}
 
     /**
@@ -148,7 +175,17 @@ class SectionRollout
         $open = [];
 
         foreach (array_keys(self::SECTIONS) as $portal) {
-            $open[$portal] = array_values(array_intersect(array_keys($this->items($portal)), (array) ($value['open'][$portal] ?? [])));
+            $saved = (array) ($value['open'][$portal] ?? []);
+
+            if (($value['version'] ?? 1) < 2) {
+                foreach (self::SPLIT_FROM[$portal] ?? [] as $key => $from) {
+                    if (in_array($from, $saved, true)) {
+                        $saved[] = $key;
+                    }
+                }
+            }
+
+            $open[$portal] = array_values(array_intersect(array_keys($this->items($portal)), $saved));
         }
 
         return ['active' => (bool) ($value['active'] ?? false), 'open' => $open];
@@ -165,7 +202,7 @@ class SectionRollout
             $clean[$portal] = array_values(array_intersect(array_keys($this->items($portal)), $open[$portal] ?? []));
         }
 
-        $this->settings->set(self::SETTING, ['active' => $active, 'open' => $clean], $actor);
+        $this->settings->set(self::SETTING, ['active' => $active, 'open' => $clean, 'version' => 2], $actor);
     }
 
     /**
@@ -211,6 +248,13 @@ class SectionRollout
 
         $portal = $user->type->value;
         $path = '/'.ltrim($path, '/');
+
+        foreach (self::RETIRED[$portal] ?? [] as $prefix) {
+            if ($path === $prefix || str_starts_with($path, $prefix.'/')) {
+                return false;
+            }
+        }
+
         $longest = 0;
         $owners = [];
 

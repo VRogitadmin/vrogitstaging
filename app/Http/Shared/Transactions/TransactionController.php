@@ -51,6 +51,16 @@ class TransactionController extends Controller
     ];
 
     /**
+     * Still waiting for someone: listed whatever the period, as on Manual
+     * Deposit / Manual Payout, so All deposits / withdrawals never hide an
+     * open one (client request 2026-11-09).
+     */
+    public const WAITING = [
+        'payin' => ['created', 'awaiting_payment', 'payment_submitted', 'payment_detected', 'under_review'],
+        'payout' => ['assigned', 'processing'],
+    ];
+
+    /**
      * The Section rollout item that owns each extra tab (under the portal).
      */
     public const SECTION_PATHS = ['chargeback' => 'chargebacks', 'return' => 'payout-returns'];
@@ -78,12 +88,15 @@ class TransactionController extends Controller
         $selected = $request->query('txn');
 
         $filters = self::filters($request, $actor);
-        // Created in the period (Today by default). The Chargebacks and
-        // Payout returns pages are work queues: every open case, any date.
+        // Created in the period (Today by default), plus every one still
+        // waiting, any date (WAITING). The Chargebacks and Payout returns
+        // pages are work queues: every open case, any date.
         $period = $page === null ? Period::fromRequest($request) : null;
 
         $base = fn () => self::filtered(self::scoped($actor)->where('direction', $direction), $filters)
-            ->when($period !== null, fn (Builder $query) => $period->apply($query, 'created_at'));
+            ->when($period !== null, fn (Builder $query) => $query->where(fn (Builder $query) => $query
+                ->whereIn('status', self::WAITING[$direction])
+                ->orWhere(fn (Builder $query) => $period->apply($query, 'created_at'))));
 
         $transactions = $base()
             ->with(self::ROW_RELATIONS)
@@ -112,6 +125,8 @@ class TransactionController extends Controller
                 'amount' => (int) $counts->whereIn('status', $statuses)->sum('amount'),
             ])->when($extra !== null, fn ($summary) => $summary->put((string) $extra, $chargebacks ? self::chargebackSummary(self::withChargeback($base(), $actor)) : self::returnSummary($base()->whereNotNull('return_status')))),
             'page' => $page,
+            // All deposits / All withdrawals tab (Chargebacks and Payout returns stay pages of their own).
+            'hub' => $page === null ? fn () => PaymentHub::props($actor, $direction === 'payout' ? PaymentHub::WITHDRAWAL : PaymentHub::DEPOSIT) : null,
             'selected' => is_string($selected) ? $selected : null,
             'detail' => Inertia::optional(function () use ($selected, $actor) {
                 $txn = is_string($selected) ? Transaction::query()->find($selected) : null;

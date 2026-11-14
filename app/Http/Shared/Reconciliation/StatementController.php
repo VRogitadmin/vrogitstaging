@@ -12,6 +12,7 @@ use App\Domain\Reconciliation\Models\StatementEntry;
 use App\Domain\Reporting\Period;
 use App\Domain\Transaction\Models\Transaction;
 use App\Http\Controller;
+use App\Http\Shared\Transactions\PaymentHub;
 use App\Support\Money;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\RedirectResponse;
@@ -71,6 +72,7 @@ class StatementController extends Controller
 
         return Inertia::render('statements/index', [
             'portal' => $actor->type->value,
+            'hub' => fn () => PaymentHub::props($actor, PaymentHub::DEPOSIT, withEntry: true),
             'items' => [...$items->toArray(), 'data' => $rows],
             'filters' => $filters,
             'period' => Period::fromRequest($request)->toArray(),
@@ -95,6 +97,8 @@ class StatementController extends Controller
             'can' => [
                 'create' => $actor->can('statements.create'),
                 'resolve' => $actor->can('reconciliation.resolve'),
+                // Only Admin corrects a line's UTR / amount (client request 2026-11-14).
+                'edit_line' => $actor->isType(UserType::Admin) && $actor->can('reconciliation.resolve'),
             ],
             'selected' => is_string($selected) ? $selected : null,
             'detail' => Inertia::optional(function () use ($selected, $actor) {
