@@ -17,8 +17,12 @@ import {
     TransactionDrawer,
 } from '@/components/pg/transaction-drawer';
 import type { TxnDetail, TxnRow } from '@/components/pg/transaction-drawer';
-import { PeriodFilter, periodQuery } from '@/components/pg/period-filter';
-import type { PeriodValue } from '@/components/pg/period-filter';
+import {
+    OlderOpenBanner,
+    PeriodFilter,
+    periodQuery,
+} from '@/components/pg/period-filter';
+import type { OlderOpen, PeriodValue } from '@/components/pg/period-filter';
 import { TxnFilters } from '@/components/pg/txn-filters';
 import type { TxnFilterValues } from '@/components/pg/txn-filters';
 import { formatDateTime, formatRelative } from '@/lib/dates';
@@ -30,6 +34,7 @@ import adminDeposits from '@/routes/admin/deposits';
 import { show as fileUrl } from '@/routes/files';
 import branchDeposits from '@/routes/branch/deposits';
 import type { UserType } from '@/types';
+import { cleanUtr } from '@/lib/utr';
 
 type Tab = 'pending' | 'hold' | 'awaiting' | 'approved' | 'declined';
 
@@ -45,8 +50,10 @@ type Props = {
         next_page_url: string | null;
     };
     filters: TxnFilterValues & { search: string };
-    /** Applies to the Approved and Declined tabs (decision time). */
+    /** Every tab: Approved / Declined by decision time, the rest by creation time. */
     period: PeriodValue;
+    /** Open deposits of this tab created before the period (banner). */
+    older?: OlderOpen;
     partners: { id: string; code: string; name: string }[];
     branch_options: { id: string; code: string; name: string }[];
     reasons: Record<string, string>;
@@ -277,10 +284,16 @@ export default function Deposits(props: Props) {
             <Panel className="px-3 py-2.5">
                 <PeriodFilter period={period} onChange={visit} />
                 <p className="mt-1.5 text-[11.5px] text-tx3">
-                    The period applies to Approved and Declined (by decision
-                    time). Pending, Payment hold and Not paid yet always show
-                    every open deposit.
+                    The period applies to Approved and Declined by decision
+                    time, and to the other tabs by creation time.
                 </p>
+                <div className="mt-2 empty:hidden">
+                    <OlderOpenBanner
+                        older={props.older}
+                        noun={['deposit', 'deposits']}
+                        onShow={(query) => visit(query)}
+                    />
+                </div>
             </Panel>
 
             <Panel className="flex flex-wrap items-center gap-2 px-3 py-2.5">
@@ -791,13 +804,14 @@ function ApproveDialog({
                 error={errors.bank_utr ?? errors.commission ?? errors.status}
             >
                 <TextInput
+                    autoCapitalize="characters"
                     autoFocus
                     required
                     className="font-mono"
                     value={form.data.bank_utr}
                     invalid={!!errors.bank_utr}
                     onChange={(event) =>
-                        form.setData('bank_utr', event.target.value)
+                        form.setData('bank_utr', cleanUtr(event.target.value))
                     }
                 />
             </Field>

@@ -9,6 +9,12 @@ import { Drawer } from '@/components/pg/drawer';
 import { EmptyState } from '@/components/pg/empty-state';
 import { Field, SelectInput, TextInput } from '@/components/pg/field';
 import { ViewTabs } from '@/components/pg/filter-bar';
+import {
+    OlderOpenBanner,
+    PeriodFilter,
+    periodQuery,
+} from '@/components/pg/period-filter';
+import type { OlderOpen, PeriodValue } from '@/components/pg/period-filter';
 import { FormDialog } from '@/components/pg/form-dialog';
 import { KpiGrid, StatTile } from '@/components/pg/kpi-card';
 import { PaymentHubHeader } from '@/components/pg/payment-hub';
@@ -17,6 +23,7 @@ import {
     LineAmount,
     LineSummary,
     MATCH_LABELS,
+    MoveLineDialog,
 } from '@/components/pg/reconciliation';
 import type {
     CaseSummary,
@@ -31,6 +38,7 @@ import adminAdjustments from '@/routes/admin/adjustments';
 import adminCases from '@/routes/admin/cases';
 import branchCases from '@/routes/branch/cases';
 import type { UserType } from '@/types';
+import { cleanUtr } from '@/lib/utr';
 
 type CaseRow = CaseSummary & {
     branch: { code: string; name: string };
@@ -69,6 +77,10 @@ type Props = {
         next_page_url: string | null;
     };
     filters: { type: string | null; branch: string | null; search: string };
+    /** Open cases by when they were opened, resolved ones by when resolved. */
+    period: PeriodValue;
+    /** Open cases opened before the period (banner). */
+    older?: OlderOpen;
     counts: { open: number; resolved: number; types: Record<string, number> };
     kpis: {
         credit: number;
@@ -80,6 +92,8 @@ type Props = {
     types: Record<string, string>;
     branches: { id: string; code: string; name: string }[];
     selected: string | null;
+    /** The linked case when it isn't on this page of the list. */
+    selected_case: CaseRow | null;
     candidates?: Candidate[];
 };
 
@@ -97,20 +111,35 @@ type Action =
  * the drawer offers the transactions it could belong to.
  */
 export default function Cases(props: Props) {
-    const { portal, tab, cases, filters, counts, kpis, types, branches } =
-        props;
+    const {
+        portal,
+        tab,
+        cases,
+        filters,
+        period,
+        counts,
+        kpis,
+        types,
+        branches,
+    } = props;
     const routes = portal === 'admin' ? adminCases : branchCases;
     const [search, setSearch] = useState(filters.search);
     const [openId, setOpenId] = useState<string | null>(props.selected);
-    const open = cases.data.find((item) => item.id === openId) ?? null;
+    const open =
+        cases.data.find((item) => item.id === openId) ??
+        (props.selected_case?.id === openId ? props.selected_case : null);
 
-    const visit = (next: Record<string, string | null>) =>
+    const visit = (next: Record<string, string | null | undefined>) =>
         router.get(
             routes.index({
                 query: Object.fromEntries(
-                    Object.entries({ tab, ...filters, search, ...next }).filter(
-                        ([, value]) => value,
-                    ),
+                    Object.entries({
+                        tab,
+                        ...filters,
+                        ...('range' in next ? {} : periodQuery(period)),
+                        search,
+                        ...next,
+                    }).filter(([, value]) => value),
                 ) as Record<string, string>,
             }).url,
             {},
@@ -187,6 +216,10 @@ export default function Cases(props: Props) {
                             {formatPaise(item.entry.transaction.amount)} ·{' '}
                             {item.entry.transaction.branch}
                         </div>
+                        <StatusBadge
+                            className="mt-1"
+                            status={item.entry.transaction.status}
+                        />
                     </div>
                 ) : (
                     <span className="text-xs text-tx3">none found</span>
@@ -226,30 +259,53 @@ export default function Cases(props: Props) {
             ),
         },
         {
-            key: 'when',
-            header: tab === 'open' ? 'Waiting' : 'Resolution',
-            cell: (item) =>
-                tab === 'open' ? (
-                    <span className="text-xs whitespace-nowrap">
-                        {formatRelative(item.created_at)}
-                    </span>
-                ) : (
-                    <div className="text-xs">
-                        <div className="font-medium">
-                            {item.resolution_label}
-                        </div>
-                        <div className="text-tx3">
-                            {item.resolved_by} ·{' '}
-                            {formatDateTime(item.resolved_at)}
-                        </div>
-                    </div>
-                ),
+            // Exact date and time (client request 2026-11-18), with how long
+            // it has been waiting underneath.
+            key: 'opened',
+            header: 'Opened',
+            cell: (item) => (
+                <div className="text-xs whitespace-nowrap">
+                    <div>{formatDateTime(item.created_at)}</div>
+                    {tab === 'open' &&
+                        formatRelative(item.created_at).endsWith(' ago') && (
+                            <div className="text-tx3">
+                                waiting{' '}
+                                {formatRelative(item.created_at).replace(
+                                    ' ago',
+                                    '',
+                                )}
+                            </div>
+                        )}
+                </div>
+            ),
         },
+        ...(tab === 'resolved'
+            ? [
+                  {
+                      key: 'when',
+                      header: 'Resolution',
+                      cell: (item: CaseRow) => (
+                          <div className="text-xs">
+                              <div className="font-medium">
+                                  {item.resolution_label}
+                              </div>
+                              <div className="whitespace-nowrap text-tx3">
+                                  {item.resolved_by} ·{' '}
+                                  {formatDateTime(item.resolved_at)}
+                              </div>
+                          </div>
+                      ),
+                  },
+              ]
+            : []),
         {
             key: 'action',
             header: '',
             align: 'right',
+            // Branch login: no Resolve button (client request 2026-11-17);
+            // the branch acts from Manual Entry.
             cell: (item) =>
+                portal !== 'branch' &&
                 item.can.resolve && (
                     <PgButton
                         variant="primary"
@@ -313,6 +369,20 @@ export default function Cases(props: Props) {
                     active={tab}
                     onChange={(key) => visit({ tab: key })}
                 />
+                <div className="border-b border-ln2 px-3 py-2.5">
+                    <PeriodFilter period={period} onChange={visit} />
+                    <p className="mt-1.5 text-[11.5px] text-tx3">
+                        The period applies to open cases by when they were
+                        opened, and to resolved ones by when they were resolved.
+                    </p>
+                    <div className="mt-2 empty:hidden">
+                        <OlderOpenBanner
+                            older={props.older}
+                            noun={['open case', 'open cases']}
+                            onShow={visit}
+                        />
+                    </div>
+                </div>
                 <div className="flex flex-wrap items-center gap-2 border-b border-ln2 px-3 py-2.5">
                     <SelectInput
                         className="h-[30px] w-[240px] text-[12.5px]"
@@ -508,7 +578,9 @@ function CaseDrawer({
                         </h3>
                         <p className="text-xs text-tx3">
                             {line.direction === 'credit'
-                                ? 'Deposits on this account for exactly this amount, around the line’s date. Only an exact amount can be linked.'
+                                ? line.utr
+                                    ? `Deposits with UTR ${line.utr}. Only the same UTR and the exact amount can be linked.`
+                                    : 'Deposits on this account for exactly this amount, around the line’s date. Only an exact amount can be linked.'
                                 : 'Paid payouts of this branch for exactly this amount, around the line’s date.'}
                         </p>
                         <form
@@ -573,8 +645,22 @@ function CaseDrawer({
                                                 '—'}
                                         </div>
                                     </div>
-                                    {candidate.late ? (
-                                        item.can.approve_late ? (
+                                    {line.utr &&
+                                    candidate.direction === 'payin' &&
+                                    candidate.customer_utr !== line.utr &&
+                                    candidate.bank_utr !== line.utr ? (
+                                        <span className="max-w-[200px] text-right text-xs text-tx3">
+                                            Different UTR: only the deposit with
+                                            UTR {line.utr} can be linked.
+                                        </span>
+                                    ) : candidate.late ? (
+                                        !candidate.same_amount ? (
+                                            <span className="max-w-[200px] text-right text-xs text-tx3">
+                                                Different amount: it can’t be
+                                                approved. If the bank line was
+                                                typed wrong, Admin corrects it.
+                                            </span>
+                                        ) : item.can.approve_late ? (
                                             <PgButton
                                                 variant="primary"
                                                 className="h-7 px-2 text-xs"
@@ -607,10 +693,12 @@ function CaseDrawer({
                                             Link
                                         </PgButton>
                                     ) : (
-                                        <span className="max-w-[180px] text-right text-xs text-tx3">
-                                            {candidate.status === 'success'
-                                                ? 'Different amount: only exact amounts can be linked'
-                                                : 'Approve it in Manual Deposit for the amount received; this line then links itself'}
+                                        <span className="max-w-[200px] text-right text-xs text-tx3">
+                                            {line.direction === 'debit'
+                                                ? 'No transfer of this amount without a bank line: only exact amounts can be linked'
+                                                : candidate.status === 'success'
+                                                  ? 'Different amount: only exact amounts can be linked'
+                                                  : 'A different amount can’t be approved: decline it from the statement line (Manual Entry), and this line waits for a deposit of the amount the bank shows. If the line was typed wrong, Admin corrects it.'}
                                         </span>
                                     )}
                                 </div>
@@ -666,47 +754,50 @@ function CaseDrawer({
                         </section>
                     )}
 
-                    <section className="flex flex-col gap-2.5">
-                        <h3 className="text-[12px] font-semibold tracking-[.04em] text-tx3 uppercase">
-                            Or close it
-                        </h3>
-                        <div className="flex flex-wrap gap-2">
-                            <PgButton
-                                onClick={() =>
-                                    setAction({
-                                        kind: 'close',
-                                        resolution: 'rejected',
-                                    })
-                                }
-                            >
-                                Not a customer payment
-                            </PgButton>
-                            {line.direction === 'credit' && (
+                    {/* Only Admin closes a line (client request 2026-11-17). */}
+                    {portal === 'admin' && (
+                        <section className="flex flex-col gap-2.5">
+                            <h3 className="text-[12px] font-semibold tracking-[.04em] text-tx3 uppercase">
+                                Or close it
+                            </h3>
+                            <div className="flex flex-wrap gap-2">
                                 <PgButton
                                     onClick={() =>
                                         setAction({
                                             kind: 'close',
-                                            resolution: 'refunded',
+                                            resolution: 'rejected',
                                         })
                                     }
                                 >
-                                    Returned to customer
+                                    Not a customer payment
                                 </PgButton>
-                            )}
-                            {portal === 'admin' && canAdjust && (
-                                <Link
-                                    href={
-                                        adminAdjustments.index({
-                                            query: { case: item.id },
-                                        }).url
-                                    }
-                                    className="inline-flex h-8 items-center rounded-[7px] border border-ln bg-sf px-3 text-[13px] font-medium"
-                                >
-                                    Correct with an adjustment
-                                </Link>
-                            )}
-                        </div>
-                    </section>
+                                {line.direction === 'credit' && (
+                                    <PgButton
+                                        onClick={() =>
+                                            setAction({
+                                                kind: 'close',
+                                                resolution: 'refunded',
+                                            })
+                                        }
+                                    >
+                                        Returned to customer
+                                    </PgButton>
+                                )}
+                                {portal === 'admin' && canAdjust && (
+                                    <Link
+                                        href={
+                                            adminAdjustments.index({
+                                                query: { case: item.id },
+                                            }).url
+                                        }
+                                        className="inline-flex h-8 items-center rounded-[7px] border border-ln bg-sf px-3 text-[13px] font-medium"
+                                    >
+                                        Correct with an adjustment
+                                    </Link>
+                                )}
+                            </div>
+                        </section>
+                    )}
                 </>
             )}
 
@@ -760,10 +851,21 @@ function CaseDrawer({
                 />
             )}
             {action?.kind === 'move_line' && line && (
-                <MoveLine
+                <MoveLineDialog
                     url={routes.moveLine(item.id).url}
                     from={line.account.label}
-                    accounts={item.move_line}
+                    accounts={item.move_line.map((account) => ({
+                        id: account.id,
+                        name: [
+                            account.label,
+                            account.bank &&
+                                `${account.bank}${account.last4 ? ` ··${account.last4}` : ''}`,
+                            account.upi,
+                        ]
+                            .filter(Boolean)
+                            .join(' · '),
+                    }))}
+                    preselect={txn?.account_id}
                     onClose={() => setAction(null)}
                     onDone={onClose}
                 />
@@ -811,85 +913,6 @@ function CaseDrawer({
     );
 }
 
-/** Move a line typed under the wrong account to the right one. */
-function MoveLine({
-    url,
-    from,
-    accounts,
-    onClose,
-    onDone,
-}: {
-    url: string;
-    from: string;
-    accounts: CaseRow['move_line'];
-    onClose: () => void;
-    onDone: () => void;
-}) {
-    const form = useForm({
-        payment_account_id: accounts.length === 1 ? accounts[0].id : '',
-        note: '',
-    });
-
-    return (
-        <FormDialog
-            open
-            onOpenChange={(next) => !next && onClose()}
-            width={460}
-            title="Move this line to another account"
-            description={`The line was typed under ${from}. Choose the account the money actually came into: the line moves there and is matched again, and the case settles if it now matches. The move is kept in the history.`}
-            submitLabel={form.processing ? 'Moving…' : 'Move line'}
-            processing={form.processing}
-            onSubmit={() =>
-                form.post(url, {
-                    preserveScroll: true,
-                    onSuccess: () => {
-                        onClose();
-                        onDone();
-                    },
-                })
-            }
-        >
-            <Field
-                label="Correct account"
-                required
-                error={form.errors.payment_account_id}
-            >
-                <SelectInput
-                    required
-                    value={form.data.payment_account_id}
-                    onChange={(event) =>
-                        form.setData('payment_account_id', event.target.value)
-                    }
-                >
-                    <option value="">Choose…</option>
-                    {accounts.map((account) => (
-                        <option key={account.id} value={account.id}>
-                            {[
-                                account.label,
-                                account.bank &&
-                                    `${account.bank}${account.last4 ? ` ··${account.last4}` : ''}`,
-                                account.upi,
-                            ]
-                                .filter(Boolean)
-                                .join(' · ')}
-                        </option>
-                    ))}
-                </SelectInput>
-            </Field>
-            <Field label="Note" required error={form.errors.note}>
-                <TextInput
-                    required
-                    placeholder="e.g. Typed under HDFC 1 by mistake; credit is in HDFC 2"
-                    value={form.data.note}
-                    onChange={(event) =>
-                        form.setData('note', event.target.value)
-                    }
-                />
-            </Field>
-        </FormDialog>
-    );
-}
-
 /** Admin: approve an expired / declined deposit whose money arrived (G-25). */
 function ApproveLate({
     url,
@@ -916,7 +939,7 @@ function ApproveLate({
             open
             onOpenChange={(next) => !next && onClose()}
             title={`Approve ${txn.reference} late?`}
-            description={`The deposit is ${txn.status}, but the bank shows ${formatPaise(line.amount)} on ${formatDate(line.value_date)}. Approving credits the partner ${formatPaise(line.amount)}${txn.same_amount ? '' : ` (the order was for ${formatPaise(txn.amount)})`} now and sends payin.success with “late”. This can’t be undone.`}
+            description={`The deposit is ${txn.status}, but the bank shows ${formatPaise(line.amount)} on ${formatDate(line.value_date)}. Approving credits the partner ${formatPaise(txn.amount)} now and sends payin.success with “late”. This can’t be undone.`}
             submitLabel="Approve late"
             processing={form.processing}
             onSubmit={() =>
@@ -936,11 +959,12 @@ function ApproveLate({
             )}
             <Field label="Bank UTR" error={errors.bank_utr}>
                 <TextInput
+                    autoCapitalize="characters"
                     required
                     className="font-mono"
                     value={form.data.bank_utr}
                     onChange={(event) =>
-                        form.setData('bank_utr', event.target.value)
+                        form.setData('bank_utr', cleanUtr(event.target.value))
                     }
                 />
             </Field>

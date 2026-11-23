@@ -21,16 +21,28 @@ class AuthenticatePartner
 
     public function handle(Request $request, Closure $next): Response
     {
-        ['partner' => $partner, 'key' => $key] = $this->authenticator->authenticate(
-            $request->header('X-Key-Id'),
-            $request->header('X-Timestamp'),
-            $request->header('X-Nonce'),
-            $request->header('X-Signature'),
-            $request->getMethod(),
-            Hosts::apiRequestUri($request),
-            $request->getContent(),
-            $request->ip(),
-        );
+        $failures = 'partner-api-fail:'.$request->ip();
+
+        if (RateLimiter::tooManyAttempts($failures, ApiAuthenticator::MAX_FAILURES_PER_MINUTE)) {
+            throw new ApiException('rate_limited', 'Too many failed authentication attempts from this address. Retry in '.RateLimiter::availableIn($failures).' seconds.', 429);
+        }
+
+        try {
+            ['partner' => $partner, 'key' => $key] = $this->authenticator->authenticate(
+                $request->header('X-Key-Id'),
+                $request->header('X-Timestamp'),
+                $request->header('X-Nonce'),
+                $request->header('X-Signature'),
+                $request->getMethod(),
+                Hosts::apiRequestUri($request),
+                $request->getContent(),
+                $request->ip(),
+            );
+        } catch (ApiException $exception) {
+            RateLimiter::hit($failures, 60);
+
+            throw $exception;
+        }
 
         $request->attributes->set('partner', $partner);
         $request->attributes->set('api_key', $key);

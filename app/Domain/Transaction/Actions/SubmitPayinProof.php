@@ -34,8 +34,6 @@ use Illuminate\Validation\ValidationException;
  */
 class SubmitPayinProof
 {
-    public const UTR_PATTERN = '/^[A-Z0-9]{6,22}$/';
-
     private const PENDING = 'This UTR has already been submitted for another payment that is pending (being checked). If that was you, please wait for it to be confirmed — don’t submit it again. Otherwise check the UTR in your bank or UPI app.';
 
     private const SUCCEEDED = 'This UTR has already been used for a successful payment, so it can’t be used again. Check the UTR in your bank or UPI app; if it is right, contact support.';
@@ -58,8 +56,13 @@ class SubmitPayinProof
             throw ValidationException::withMessages(['utr' => __('Enter the UTR / reference number, or upload a screenshot of the payment.')]);
         }
 
-        if ($normalised !== null && preg_match(self::UTR_PATTERN, $normalised) !== 1) {
-            throw ValidationException::withMessages(['utr' => __('That doesn’t look like a UTR. It is usually 12 digits, shown in your bank or UPI app.')]);
+        // UPI / QR: numbers only. Bank transfer: also a NEFT / RTGS reference.
+        $bankTransfer = $payin->method === 'bank_transfer';
+
+        if ($normalised !== null && ! Utr::valid($normalised, $bankTransfer)) {
+            throw ValidationException::withMessages(['utr' => $bankTransfer
+                ? __(Utr::MESSAGE)
+                : __('A UPI UTR has numbers only (no letters), usually 12 digits, shown in your UPI app.')]);
         }
 
         if ($normalised !== null) {
@@ -73,7 +76,7 @@ class SubmitPayinProof
             if ($locked->payinStatus() !== PayinStatus::AwaitingPayment) {
                 throw ValidationException::withMessages(['utr' => $locked->payinStatus()->isOpen()
                     ? __('Choose how you paid first.')
-                    : __('This payment can no longer be updated.')]);
+                    : __('This payment session has ended (expired or closed), so it can’t be submitted here. If you already paid, keep your UTR and screenshot and contact the merchant’s support with your Order ID: the payment is checked against the bank.')]);
             }
 
             // Checked again under the lock (refuseTaken ran before it).

@@ -1,6 +1,9 @@
+import { useForm } from '@inertiajs/react';
 import { formatDate } from '@/lib/dates';
 import { formatPaise } from '@/lib/money';
 import { cn } from '@/lib/utils';
+import { Field, SelectInput, TextInput } from './field';
+import { FormDialog } from './form-dialog';
 import { StatusBadge } from './status-badge';
 
 /** Shapes from App\Http\Shared\Reconciliation\StatementPresenter. */
@@ -12,6 +15,8 @@ export type LineTxn = {
     status: string;
     partner: string;
     branch: string | null;
+    /** The account the money was meant for. */
+    account_id: string | null;
     customer_utr: string | null;
     bank_utr: string | null;
     decided_by: string | null;
@@ -72,7 +77,8 @@ export const DISPLAY_LABELS: Record<StatementLine['display'], string> = {
 export const MATCH_LABELS: Record<StatementLine['branch_match'], string> = {
     matched: 'Matched',
     mismatch: 'Mismatch',
-    none: 'Not matched',
+    // No deposit / payout yet, so no branch to compare with.
+    none: 'No deposit yet',
 };
 
 /** The line's amount, signed and coloured: + credit, − debit. */
@@ -172,5 +178,89 @@ export function LineSummary({ line }: { line: StatementLine }) {
                 {line.account.number ? ` · ${line.account.number}` : ''}
             </div>
         </div>
+    );
+}
+
+/**
+ * Move a typed line to the account of its branch the money actually came
+ * into (CaseController::moveLine): it is matched again, and the case settles
+ * if it now matches. Used by the case drawer and the branch "Match" button.
+ */
+export function MoveLineDialog({
+    url,
+    from,
+    accounts,
+    preselect,
+    onClose,
+    onDone,
+}: {
+    url: string;
+    from: string;
+    accounts: { id: string; name: string }[];
+    /** The account the deposit was meant for, when known. */
+    preselect?: string | null;
+    onClose: () => void;
+    onDone?: () => void;
+}) {
+    const form = useForm({
+        payment_account_id:
+            preselect && accounts.some((account) => account.id === preselect)
+                ? preselect
+                : accounts.length === 1
+                  ? accounts[0].id
+                  : '',
+        note: '',
+    });
+
+    return (
+        <FormDialog
+            open
+            onOpenChange={(next) => !next && onClose()}
+            width={460}
+            title="Change bank account"
+            description={`This line was entered under ${from}. Choose the account the money actually came into: the line moves there and is matched again. The change is kept in the history.`}
+            submitLabel={form.processing ? 'Moving…' : 'Change account'}
+            processing={form.processing}
+            onSubmit={() =>
+                form.post(url, {
+                    preserveScroll: true,
+                    onSuccess: () => {
+                        onClose();
+                        onDone?.();
+                    },
+                })
+            }
+        >
+            <Field
+                label="Correct account"
+                required
+                error={form.errors.payment_account_id}
+            >
+                <SelectInput
+                    required
+                    value={form.data.payment_account_id}
+                    onChange={(event) =>
+                        form.setData('payment_account_id', event.target.value)
+                    }
+                >
+                    <option value="">Choose…</option>
+                    {accounts.map((account) => (
+                        <option key={account.id} value={account.id}>
+                            {account.name}
+                        </option>
+                    ))}
+                </SelectInput>
+            </Field>
+            <Field label="Note" required error={form.errors.note}>
+                <TextInput
+                    required
+                    placeholder="e.g. Entered under HDFC 1 by mistake; credit is in HDFC 2"
+                    value={form.data.note}
+                    onChange={(event) =>
+                        form.setData('note', event.target.value)
+                    }
+                />
+            </Field>
+        </FormDialog>
     );
 }

@@ -5,6 +5,8 @@ import { DataTable, Panel } from '@/components/pg/data-table';
 import { EmptyState } from '@/components/pg/empty-state';
 import { ViewTabs } from '@/components/pg/filter-bar';
 import { PageHeader } from '@/components/pg/page-header';
+import { PeriodFilter, periodQuery } from '@/components/pg/period-filter';
+import type { PeriodQuery, PeriodValue } from '@/components/pg/period-filter';
 import { formatDateTime } from '@/lib/dates';
 import { cn } from '@/lib/utils';
 import { apiLogs } from '@/routes/partner';
@@ -14,6 +16,12 @@ type Log = {
     method: string;
     path: string;
     status_code: number;
+    /** API error code of a refused call, e.g. wrong_environment. */
+    error_code: string | null;
+    /** The address the call was sent to. */
+    host: string | null;
+    /** X-Key-Id as sent. */
+    key_id: string | null;
     duration_ms: number;
     ip: string | null;
     request_id: string | null;
@@ -29,19 +37,26 @@ type Props = {
         next_page_url: string | null;
     };
     filters: { result: string | null; search: string };
+    /** Sent in the period (Today by default). */
+    period: PeriodValue;
+    /** This server: each server keeps its own log. */
+    server: { environment: string; base_url: string };
 };
 
-export default function ApiLogs({ logs, filters }: Props) {
+export default function ApiLogs({ logs, filters, period, server }: Props) {
     const [search, setSearch] = useState(filters.search);
 
-    const visit = (next: Partial<Props['filters']>) =>
+    const visit = (next: Partial<Props['filters'] & PeriodQuery>) =>
         router.get(
             apiLogs({
                 query: Object.fromEntries(
-                    Object.entries({ ...filters, search, ...next }).filter(
-                        ([, v]) => v,
-                    ),
-                ),
+                    Object.entries({
+                        ...filters,
+                        ...('range' in next ? {} : periodQuery(period)),
+                        search,
+                        ...next,
+                    }).filter(([, v]) => v),
+                ) as Record<string, string>,
             }).url,
             {},
             { preserveState: true, replace: true },
@@ -62,6 +77,14 @@ export default function ApiLogs({ logs, filters }: Props) {
                 title="API Logs"
                 description="Every call your servers made to the PayGate API, newest first. Request bodies are not stored."
             />
+            <p className="mb-3 text-[12.5px] text-tx2">
+                This is the <b>{server.environment}</b> server (
+                <span className="font-mono">{server.base_url}</span>). Calls
+                sent to another PayGate server are in that server&apos;s log.
+                Refused calls show their error code, e.g.{' '}
+                <span className="font-mono">wrong_environment</span> when a key
+                of another server was used.
+            </p>
             <Panel className="overflow-hidden">
                 <ViewTabs
                     views={[
@@ -75,13 +98,16 @@ export default function ApiLogs({ logs, filters }: Props) {
                         visit({ result: key === 'all' ? null : key })
                     }
                 />
+                <div className="border-b border-ln2 px-3 py-2.5">
+                    <PeriodFilter period={period} onChange={visit} />
+                </div>
                 <div className="flex items-center gap-2 border-b border-ln2 px-3 py-2.5">
                     <label className="flex h-[30px] w-[300px] items-center gap-2 rounded-[7px] border border-ln px-2.5 text-tx3 focus-within:border-ac">
                         <Search className="size-3.5" />
                         <input
                             value={search}
                             onChange={(event) => setSearch(event.target.value)}
-                            placeholder="Order id, request id or path"
+                            placeholder="Order id, request id, key id, error or path"
                             className="w-full bg-transparent text-[12.5px] text-tx outline-none placeholder:text-tx3"
                         />
                     </label>
@@ -103,9 +129,16 @@ export default function ApiLogs({ logs, filters }: Props) {
                             key: 'call',
                             header: 'Call',
                             cell: (l: Log) => (
-                                <span className="font-mono text-xs">
+                                <div className="font-mono text-xs">
                                     <b>{l.method}</b> {l.path}
-                                </span>
+                                    {(l.host || l.key_id) && (
+                                        <div className="text-[11px] text-tx3">
+                                            {l.host}
+                                            {l.host && l.key_id && ' · '}
+                                            {l.key_id}
+                                        </div>
+                                    )}
+                                </div>
                             ),
                         },
                         {
@@ -123,6 +156,11 @@ export default function ApiLogs({ logs, filters }: Props) {
                                     )}
                                 >
                                     {l.status_code}
+                                    {l.error_code && (
+                                        <span className="ml-1.5 font-normal">
+                                            {l.error_code}
+                                        </span>
+                                    )}
                                 </span>
                             ),
                         },

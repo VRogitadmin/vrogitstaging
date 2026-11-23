@@ -93,6 +93,36 @@ class TransactionScreensTest extends TestCase
         $this->assertNull($this->partial($stranger, route('partner.payins.index', ['txn' => $payin->id]), 'transactions/index', 'detail')->json('props.detail'));
     }
 
+    public function test_the_timeline_names_who_did_each_step_as_far_as_the_viewer_may_see()
+    {
+        $payin = $this->submittedPayin();
+        $approver = User::factory()->branch(SystemRoles::BRANCH_OWNER, $this->branch)->withTwoFactor()->create(['name' => 'Ravi Approver']);
+        $this->actingAs($approver)->post(route('branch.deposits.approve', $payin), ['bank_utr' => '626812820491'])->assertSessionHasNoErrors();
+
+        $by = fn (array $detail, string $event) => collect($detail['timeline'])->firstWhere('event', $event)['by'];
+
+        // Admin: name, role and branch; the API call names the partner and key.
+        $admin = $this->partial(User::factory()->admin()->withTwoFactor()->create(), route('admin.transactions.index', ['txn' => $payin->id]), 'transactions/index', 'detail')->json('props.detail');
+        $this->assertSame('Ravi Approver', $by($admin, 'approved')['name']);
+        $this->assertSame($this->branch->name, $by($admin, 'approved')['org']);
+        $this->assertNotNull($by($admin, 'approved')['role']);
+        $this->assertSame($this->partner->name, $by($admin, 'created')['name']);
+        $this->assertStringStartsWith('API key', (string) $by($admin, 'created')['role']);
+        $this->assertSame('Customer', $by($admin, 'proof_submitted')['name']);
+        $this->assertSame('PayGate (automatic)', $by($admin, 'allocation_confirmed')['name']);
+        $this->assertStringStartsWith('to '.$this->branch->name, (string) collect($admin['timeline'])->firstWhere('event', 'allocated')['detail']);
+
+        // The same branch sees its own person; the partner sees "PayGate".
+        $branch = $this->partial(User::factory()->branch(SystemRoles::BRANCH_OWNER, $this->branch)->withTwoFactor()->create(), route('branch.payins.index', ['txn' => $payin->id]), 'transactions/index', 'detail')->json('props.detail');
+        $this->assertSame('Ravi Approver', $by($branch, 'approved')['name']);
+        $this->assertSame('Partner', $by($branch, 'created')['name']);
+
+        $partner = $this->partial(User::factory()->partner(SystemRoles::PARTNER_OWNER, $this->partner)->create(), route('partner.payins.index', ['txn' => $payin->id]), 'transactions/index', 'detail')->json('props.detail');
+        $this->assertSame(['name' => 'PayGate', 'role' => null, 'org' => null, 'auto' => false], $by($partner, 'approved'));
+        $this->assertSame('Your server', $by($partner, 'created')['name']);
+        $this->assertNull(collect($partner['timeline'])->firstWhere('event', 'allocated')['detail']);
+    }
+
     public function test_search_finds_by_reference_order_id_and_utr()
     {
         $payin = $this->submittedPayin(['order_id' => 'ORD-FIND-ME', 'customer' => ['id' => 'cust-1', 'name' => 'Ravi Kumar']], '777766665555');
@@ -102,6 +132,26 @@ class TransactionScreensTest extends TestCase
             $this->actingAs($admin)->get(route('admin.transactions.index', ['search' => $term]))
                 ->assertInertia(fn (Assert $page) => $page->has('transactions.data', 1));
         }
+    }
+
+    public function test_expired_deposits_are_only_in_the_expired_tab_but_search_still_finds_them()
+    {
+        $waiting = $this->submittedPayin(['order_id' => 'ORD-WAITING'], '777766665551');
+        $expired = $this->submittedPayin(['order_id' => 'ORD-EXPIRED'], '777766665552');
+        $expired->forceFill(['status' => 'expired'])->save();
+        $admin = User::factory()->admin()->withTwoFactor()->create();
+
+        $this->actingAs($admin)->get(route('admin.transactions.index'))
+            ->assertInertia(fn (Assert $page) => $page
+                ->has('transactions.data', 1)
+                ->where('transactions.data.0.reference', $waiting->reference)
+                ->where('summary.closed.count', 1));
+
+        $this->actingAs($admin)->get(route('admin.transactions.index', ['status' => 'closed']))
+            ->assertInertia(fn (Assert $page) => $page->has('transactions.data', 1)->where('transactions.data.0.reference', $expired->reference));
+
+        $this->actingAs($admin)->get(route('admin.transactions.index', ['search' => 'ORD-EXPIRED']))
+            ->assertInertia(fn (Assert $page) => $page->has('transactions.data', 1)->where('transactions.data.0.reference', $expired->reference));
     }
 
     public function test_payment_proofs_are_shown_only_to_admin_and_the_receiving_branch()
@@ -172,15 +222,26 @@ class TransactionScreensTest extends TestCase
             $this->assertSame(1, $count($route, ['range' => 'custom', 'from' => $today, 'to' => $today], $key));
         }
 
-        // The list shows today by default, but a deposit still waiting shows
-        // whatever the period, as on Manual Deposit's open tabs.
-        $this->assertSame(1, $count('admin.transactions.index', ['range' => 'custom', 'from' => $tomorrow, 'to' => $tomorrow], 'transactions'));
-        $this->assertSame(1, $count('admin.transactions.index', ['range' => 'yesterday'], 'transactions'));
-        $this->assertSame(1, $count('admin.deposits.index', ['range' => 'yesterday'], 'items'));
+        // The period is strict (client request 2026-11-18): a deposit still
+        // waiting is listed only in its period…
+        $this->assertSame(0, $count('admin.transactions.index', ['range' => 'custom', 'from' => $tomorrow, 'to' => $tomorrow], 'transactions'));
+        $this->assertSame(0, $count('admin.transactions.index', ['range' => 'yesterday'], 'transactions'));
+        $this->assertSame(0, $count('admin.deposits.index', ['range' => 'yesterday'], 'items'));
         $this->actingAs($admin)->get(route('admin.transactions.index', ['range' => 'yesterday']))
-            ->assertInertia(fn (Assert $page) => $page->where('summary.pending.count', 1));
+            ->assertInertia(fn (Assert $page) => $page->where('summary.pending.count', 0)->where('older', null));
         $this->actingAs($admin)->get(route('admin.transactions.index'))
-            ->assertInertia(fn (Assert $page) => $page->where('period.range', 'today'));
+            ->assertInertia(fn (Assert $page) => $page->where('period.range', 'today')->where('older', null));
+
+        // …and from a later day it is counted in the "older, still waiting"
+        // banner, whose range shows it.
+        $this->travel(2)->days();
+        $this->assertSame(0, $count('admin.deposits.index', [], 'items'));
+        $older = $this->actingAs($admin)->get(route('admin.deposits.index'))->viewData('page')['props']['older'];
+        $this->assertSame(1, $older['count']);
+        $this->assertSame(1, $count('admin.deposits.index', ['range' => 'custom', 'from' => $older['from'], 'to' => $older['to']], 'items'));
+        $this->actingAs($admin)->get(route('admin.transactions.index'))
+            ->assertInertia(fn (Assert $page) => $page->where('older.count', 1));
+        $this->travelBack();
 
         $this->actingAs($admin)->get(route('admin.transactions.index'))
             ->assertInertia(fn (Assert $page) => $page->has('branch_options', 2)->has('partners', 1));

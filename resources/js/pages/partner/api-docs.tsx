@@ -6,6 +6,7 @@ import { formatLimit } from '@/lib/money';
 
 type Props = {
     base_url: string;
+    environment: 'live' | 'sandbox' | 'testbox';
     key_id: string | null;
     clock_skew: number;
     rate_limit: number;
@@ -27,15 +28,10 @@ const STATUSES: [string, string][] = [
     ['under_review', 'Being checked manually.'],
     [
         'success',
-        'Money received and confirmed. Credit your customer received_amount now: if the customer paid less or more than ordered, received_amount differs from amount and that is what your balance is credited.',
+        'Money received and confirmed. Credit your customer now: only the order amount is ever approved, so received_amount always equals amount (a payment of another amount is declined).',
     ],
     ['rejected', 'The payment could not be confirmed.'],
     ['expired', 'Not paid in time. The payment link no longer works.'],
-    ['cancelled', 'You cancelled it before payment.'],
-    [
-        'refunded',
-        'After success, the money was returned to the customer. Your balance is debited the amount; take it back from your customer.',
-    ],
 ];
 
 const ERRORS: [string, number, string][] = [
@@ -48,6 +44,11 @@ const ERRORS: [string, number, string][] = [
     ['timestamp_out_of_range', 401, 'X-Timestamp is too far from our clock.'],
     ['nonce_reused', 401, 'The X-Nonce was already used.'],
     [
+        'wrong_environment',
+        401,
+        'The key belongs to another server (e.g. a sandbox key pk_sb_ sent to live). Check the base URL and key in your settings.',
+    ],
+    [
         'ip_not_allowed',
         403,
         'The request came from an address not on your allowed list.',
@@ -55,11 +56,6 @@ const ERRORS: [string, number, string][] = [
     ['partner_inactive', 403, 'Your account is not active.'],
     ['payin_disabled', 403, 'Pay-ins are not enabled for your account.'],
     ['payout_disabled', 403, 'Payouts are not enabled for your account.'],
-    [
-        'insufficient_balance',
-        422,
-        'Balance is low: your balance doesn’t cover amount + fee.',
-    ],
     [
         'no_branch_available',
         422,
@@ -96,7 +92,6 @@ const ERRORS: [string, number, string][] = [
         409,
         'Same customer and amount as an unpaid pay-in created seconds ago (a double click); error.payment_url is its link.',
     ],
-    ['not_cancellable', 409, 'The pay-in has already moved on.'],
     ['not_found', 404, 'No such pay-in for your account.'],
     ['rate_limited', 429, 'Too many requests; wait and retry.'],
     [
@@ -110,7 +105,7 @@ const ERRORS: [string, number, string][] = [
  * Partner API documentation (v1), written for the partner's developer.
  */
 export default function ApiDocs(props: Props) {
-    const { base_url, key_id } = props;
+    const { base_url, key_id, environment } = props;
 
     return (
         <>
@@ -151,6 +146,22 @@ export default function ApiDocs(props: Props) {
                     rows={[
                         ['Base URL', <Code key="b">{base_url}</Code>],
                         [
+                            'This server',
+                            environment === 'live'
+                                ? 'Live: real money. Keys start pk_live_ / sk_live_.'
+                                : environment === 'sandbox'
+                                  ? 'Sandbox: for testing, no real money. Keys start pk_sb_ / sk_sb_.'
+                                  : 'Testbox: for testing, no real money. Keys start pk_test_ / sk_test_.',
+                        ],
+                        [
+                            'One base URL',
+                            'Every path in this document is relative to the base URL. Keep the base URL, key id, secret and your webhook / return URLs in one configuration per server, so switching server is one change.',
+                        ],
+                        [
+                            'Which server answered',
+                            'Every answer and webhook says which server sent it: header X-PayGate-Environment and field "environment" (live, sandbox or testbox). Keys start pk_live_ (live), pk_sb_ (sandbox) or pk_test_ (testbox); a key sent to another server is refused with wrong_environment.',
+                        ],
+                        [
                             'Your key id',
                             key_id ? (
                                 <Code key="k">{key_id}</Code>
@@ -176,6 +187,32 @@ export default function ApiDocs(props: Props) {
                         ],
                     ]}
                 />
+            </Doc>
+
+            <Doc title="Going live">
+                <ol className="list-decimal space-y-1.5 pl-5">
+                    <li>
+                        On the live server, generate a live key (
+                        <Code>pk_live_…</Code>) and add your server&apos;s IPs.
+                    </li>
+                    <li>
+                        Set your live return, callback and webhook URLs there
+                        (API &amp; Webhooks). Its <b>Go-live check</b> flags any
+                        that still look like a test site.
+                    </li>
+                    <li>
+                        In your configuration, change the base URL, key id,
+                        secret and URLs together.
+                    </li>
+                    <li>
+                        Make one test call and check the answer says{' '}
+                        <Code>&quot;environment&quot;: &quot;live&quot;</Code>.
+                        Check your webhook handler sees it too. On live, a
+                        pay-in whose <Code>return_url</Code> looks like a test
+                        site is accepted with a <Code>warnings</Code> list in
+                        the answer.
+                    </li>
+                </ol>
             </Doc>
 
             <Doc title="3. Signing every request">
@@ -314,12 +351,6 @@ const signature = crypto.createHmac('sha256', secret).update(toSign).digest('hex
                                 <Code>not_found</Code>.
                             </span>,
                         ],
-                        [
-                            <Code key="4">
-                                POST /v1/payins/{'{id}'}/cancel
-                            </Code>,
-                            'Cancel before the customer pays (409 not_cancellable after that).',
-                        ],
                     ]}
                 />
                 <p>Statuses:</p>
@@ -335,11 +366,9 @@ const signature = crypto.createHmac('sha256', secret).update(toSign).digest('hex
                 <p>
                     <Code>POST /v1/payouts</Code> asks us to pay your customer.
                     The <b>fee is charged on top</b>: the amount plus your
-                    withdrawal fee comes out of your balance. A payout is paid
-                    by one branch, so it must fit the balance held at one
-                    branch; otherwise you get{' '}
-                    <Code>422 insufficient_balance</Code> (“balance is low”) and
-                    nothing is created.
+                    withdrawal fee comes out of your balance. Your balance is
+                    not checked; your daily withdrawal limit is. Over it you get{' '}
+                    <Code>422 daily_limit_reached</Code> and nothing is created.
                 </p>
                 <Pre>{`{
   "order_id": "WD-55120",
@@ -359,11 +388,9 @@ const signature = crypto.createHmac('sha256', secret).update(toSign).digest('hex
                     <Code>processing</Code> (being paid), <Code>success</Code>{' '}
                     (paid; the response carries the transfer UTR),{' '}
                     <Code>failed</Code> (couldn’t be paid; the held amount is
-                    back in your balance — send a new request to retry),{' '}
-                    <Code>cancelled</Code>. Cancel with{' '}
-                    <Code>POST /v1/payouts/{'{id}'}/cancel</Code> while it is
-                    still assigned. A branch may pay one payout in several bank
-                    transfers (hours or days apart): it stays{' '}
+                    back in your balance — send a new request to retry). A
+                    payout can’t be cancelled. A branch may pay one payout in
+                    several bank transfers (hours or days apart): it stays{' '}
                     <Code>processing</Code> until they add up, then{' '}
                     <Code>success</Code>. <Code>payments</Code> lists each
                     transfer {'{amount, utr, paid_at}'} and{' '}
@@ -415,8 +442,9 @@ const signature = crypto.createHmac('sha256', secret).update(toSign).digest('hex
 X-PayGate-Event-Id: 01J…            (unique per webhook — ignore ones you already processed)
 X-PayGate-Event: payin.success
 X-PayGate-Signature: t=1790521203,v1=5f2c…
+X-PayGate-Environment: live         (or sandbox / testbox: which server sent it)
 
-{ "id": "01J…", "type": "payin.success", "created_at": "…", "data": { "id": "PI260927K7QX4MZD", "status": "success", … } }`}</Pre>
+{ "id": "01J…", "type": "payin.success", "created_at": "…", "data": { "id": "PI260927K7QX4MZD", "status": "success", … }, "environment": "live" }`}</Pre>
                 <p>
                     <b>Late payments:</b> if a customer&apos;s money reaches the
                     bank after the pay-in expired or was declined, we may

@@ -2,8 +2,8 @@
 
 namespace App\Domain\Reconciliation\Import;
 
-use App\Domain\Transaction\Actions\SubmitPayinProof;
 use App\Domain\Transaction\Models\Transaction;
+use App\Domain\Transaction\Utr;
 use DateTimeImmutable;
 use InvalidArgumentException;
 use PhpOffice\PhpSpreadsheet\Shared\Date as ExcelDate;
@@ -15,7 +15,9 @@ use Throwable;
  * layout, so the person uploading only has to check it.
  *
  * Rows without any credit or debit (opening balance, totals, footers) are
- * skipped; rows that can't be read are reported with their row number.
+ * skipped. A row that breaks a rule (date not in the format or in the
+ * future, amount unreadable, no UTR) is reported with its row number, the
+ * field and the value, and never stored.
  */
 final class StatementParser
 {
@@ -33,7 +35,9 @@ final class StatementParser
             $cells = array_map(fn ($cell) => mb_strtolower(self::text($cell)), $row);
             $joined = implode(' | ', $cells);
 
-            if (count(array_filter($cells)) >= 3 && str_contains($joined, 'date') && preg_match('/credit|deposit|debit|withdraw|amount/', $joined) === 1) {
+            // Wallet / UPI exports (Google Pay for Business…) have "Creation
+            // time" instead of a date column.
+            if (count(array_filter($cells)) >= 3 && preg_match('/date|time/', $joined) === 1 && preg_match('/credit|deposit|debit|withdraw|amount/', $joined) === 1) {
                 $headerRow = $index + 1;
                 break;
             }
@@ -55,10 +59,11 @@ final class StatementParser
         $debit = $find('/debit|withdraw|^dr\.?$/', '/credit|deposit|\//');
         $mapping = [
             'header_row' => $headerRow,
-            'date' => $find('/value\s*date/') ?? $find('/date/'),
+            'date' => $find('/value\s*date/') ?? $find('/date/', '/update/') ?? $find('/creat|txn\s*time|transaction\s*time|^time$/'),
             'date_format' => ColumnMapping::DATE_FORMATS[0],
-            'description' => $find('/narration|description|particular|remark|details/'),
-            'utr' => $find('/utr|ref(erence)?|chq|cheque/', '/date/'),
+            // Wallet exports have no narration: the payer's name helps most.
+            'description' => $find('/narration|description|particular|remark|details/') ?? $find('/^payer/'),
+            'utr' => $find('/utr|rrn|ref(erence)?|chq|cheque/', '/date/') ?? $find('/transaction\s*id|txn\s*id/'),
             'credit' => $credit,
             'debit' => $debit,
             'amount' => $credit === null && $debit === null ? $find('/amount|amt/') : null,
@@ -67,10 +72,28 @@ final class StatementParser
         ];
 
         if ($mapping['date'] !== null) {
-            $mapping['date_format'] = self::guessDateFormat(array_column(array_slice($rows, $headerRow, 30), (int) $mapping['date']));
+            $mapping['date_format'] = self::dateFormatFor($rows, $headerRow, (int) $mapping['date']);
         }
 
         return $mapping;
+    }
+
+    /**
+     * The date format that reads the most dates of a column (the first 30
+     * lines under the header).
+     *
+     * @param  list<list<mixed>>  $rows
+     */
+    public static function dateFormatFor(array $rows, int $headerRow, int $column, ?string $preferred = null): string
+    {
+        $samples = array_column(array_slice($rows, $headerRow, 30), $column);
+
+        // A saved layout keeps its format while it still reads the file.
+        if ($preferred !== null && array_filter($samples, fn ($value) => self::text($value) !== '' && self::parseDate($value, $preferred) !== null) !== []) {
+            return $preferred;
+        }
+
+        return self::guessDateFormat($samples);
     }
 
     /**
@@ -103,7 +126,7 @@ final class StatementParser
 
     /**
      * @param  list<list<mixed>>  $rows
-     * @return array{lines: list<array{row: int, date: string, direction: string, amount: int, utr_normalized: ?string, description: ?string, balance: ?string}>, errors: list<array{row: int, message: string}>}
+     * @return array{lines: list<array{row: int, date: string, direction: string, amount: int, utr_normalized: string, description: ?string, balance: ?string}>, errors: list<array{row: int, field: string, value: string, message: string}>}
      */
     public static function parse(array $rows, ColumnMapping $mapping): array
     {
@@ -121,7 +144,8 @@ final class StatementParser
             try {
                 [$direction, $amount] = self::direction($mapping, $cell);
             } catch (InvalidArgumentException $exception) {
-                $errors[] = ['row' => $rowNo, 'message' => $exception->getMessage()];
+                $value = collect([$mapping->amount, $mapping->credit, $mapping->debit])->map(fn (?int $column) => self::text($cell($column)))->first(fn (string $text) => $text !== '') ?? '';
+                $errors[] = ['row' => $rowNo, 'field' => 'amount', 'value' => $value, 'message' => $exception->getMessage()];
 
                 continue;
             }
@@ -130,10 +154,19 @@ final class StatementParser
                 continue; // opening balance, totals…
             }
 
+            $dateText = self::text($cell($mapping->date));
             $date = self::parseDate($cell($mapping->date), $mapping->dateFormat);
 
             if ($date === null) {
-                $errors[] = ['row' => $rowNo, 'message' => __('Date “:value” is not in the format :format.', ['value' => self::text($cell($mapping->date)), 'format' => $mapping->dateFormat])];
+                $errors[] = ['row' => $rowNo, 'field' => 'date', 'value' => $dateText, 'message' => __('Date “:value” is not in the format :format.', ['value' => $dateText, 'format' => $mapping->dateFormat])];
+
+                continue;
+            }
+
+            // A bank line can't be from the future: usually day and month
+            // read the wrong way round (dd/mm vs mm/dd).
+            if ($date > now(config('app.business_timezone'))->addDay()->toDateString()) {
+                $errors[] = ['row' => $rowNo, 'field' => 'date', 'value' => $dateText, 'message' => __('Date “:value” would be :date, in the future: check the date format.', ['value' => $dateText, 'date' => $date])];
 
                 continue;
             }
@@ -141,6 +174,16 @@ final class StatementParser
             $description = self::text($cell($mapping->description));
             $utrText = self::text($cell($mapping->utr));
             $utr = self::utrFrom($utrText) ?? self::extractUtr($description);
+
+            // No UTR, no match: such a line is never stored (client request
+            // 2026-11-18), it is reported instead.
+            if ($utr === null) {
+                $errors[] = ['row' => $rowNo, 'field' => 'utr', 'value' => $utrText, 'message' => $utrText === ''
+                    ? __('No UTR in this row (UTR column empty, none in the narration). :rule', ['rule' => Utr::RULE])
+                    : __('“:value” is not a UTR, and the narration has none. :rule', ['value' => mb_substr($utrText, 0, 40), 'rule' => Utr::RULE])];
+
+                continue;
+            }
 
             $lines[] = [
                 'row' => $rowNo,
@@ -166,7 +209,9 @@ final class StatementParser
     {
         $tokens = preg_split('/[^A-Z0-9]+/', mb_strtoupper($text)) ?: [];
 
-        foreach (['/^\d{12}$/', '/^[A-Z]{4}(?=(?:[A-Z]*\d){8})[A-Z0-9]{12,18}$/', '/^\d{13,22}$/'] as $pattern) {
+        // A 12-digit UPI / IMPS number first, then a NEFT / RTGS reference
+        // (HDFCN5…), then a longer number (client request 2026-11-18).
+        foreach (['/^\d{12}$/', Utr::BANK_REFERENCE_PATTERN, '/^\d{13,22}$/'] as $pattern) {
             foreach ($tokens as $token) {
                 if (preg_match($pattern, $token) === 1) {
                     return $token;
@@ -179,7 +224,7 @@ final class StatementParser
 
     /**
      * A date cell as Y-m-d: an Excel serial number, or text in the given
-     * format (a time after the date is ignored).
+     * format (a time after the date, with or without a comma, is ignored).
      */
     public static function parseDate(mixed $value, string $format): ?string
     {
@@ -191,7 +236,10 @@ final class StatementParser
             }
         }
 
-        $text = preg_replace('/[\sT]+\d{1,2}:\d{2}(:\d{2})?(\.\d+)?\s*([AaPp][Mm])?\s*$/', '', self::text($value)) ?? '';
+        // "1 Nov 2026, 21:22" / "Nov 2, 2026, 1:23 PM": the time goes.
+        // Google Pay writes a narrow no-break space before "PM".
+        $text = preg_replace('/[\x{00A0}\x{2007}\x{202F}]/u', ' ', self::text($value)) ?? '';
+        $text = preg_replace('/[\s,T]+\d{1,2}:\d{2}(:\d{2})?(\.\d+)?\s*([AaPp]\.?[Mm]\.?)?\s*$/', '', $text) ?? '';
         $date = DateTimeImmutable::createFromFormat('!'.$format, $text);
         $problems = DateTimeImmutable::getLastErrors();
 
@@ -306,7 +354,11 @@ final class StatementParser
             $normalised = str_pad(ltrim($normalised, '0'), 12, '0', STR_PAD_LEFT);
         }
 
-        if (preg_match(SubmitPayinProof::UTR_PATTERN, $normalised) === 1 && preg_match('/\d{6}/', $normalised) === 1 && trim($normalised, '0') !== '') {
+        // A statement's UTR is 12+ digits (UPI / IMPS) or a NEFT / RTGS
+        // reference; a shorter number is a cheque / branch reference.
+        $number = ctype_digit($normalised);
+
+        if (Utr::valid($normalised) && (! $number || strlen($normalised) >= 12) && trim($normalised, '0') !== '') {
             return $normalised;
         }
 

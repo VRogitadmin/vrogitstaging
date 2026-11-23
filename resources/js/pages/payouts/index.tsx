@@ -8,6 +8,12 @@ import { Field, SelectInput, TextInput } from '@/components/pg/field';
 import { FormDialog } from '@/components/pg/form-dialog';
 import { LiveIndicator } from '@/components/pg/page-header';
 import { PaymentHubHeader } from '@/components/pg/payment-hub';
+import {
+    OlderOpenBanner,
+    PeriodFilter,
+    periodQuery,
+} from '@/components/pg/period-filter';
+import type { OlderOpen, PeriodValue } from '@/components/pg/period-filter';
 import { StatusBadge } from '@/components/pg/status-badge';
 import { TransactionDrawer } from '@/components/pg/transaction-drawer';
 import type { TxnDetail, TxnRow } from '@/components/pg/transaction-drawer';
@@ -20,6 +26,7 @@ import { cn } from '@/lib/utils';
 import adminPayouts from '@/routes/admin/payouts';
 import branchPayouts from '@/routes/branch/payouts';
 import type { UserType } from '@/types';
+import { cleanUtr } from '@/lib/utr';
 
 type Tab = 'to_pay' | 'paying' | 'paid' | 'failed';
 
@@ -46,6 +53,10 @@ type Props = {
         next_page_url: string | null;
     };
     filters: { search: string };
+    /** Every tab: Paid / Failed by decision time, the rest by creation time. */
+    period: PeriodValue;
+    /** Open payouts of this tab created before the period (banner). */
+    older?: OlderOpen;
     reasons: Record<string, string>;
     branches: { id: string; code: string; name: string }[];
     selected: string | null;
@@ -70,21 +81,24 @@ type Dialog = null | { kind: 'complete' | 'fail' | 'reassign'; payout: Row };
  * can move a waiting payout.
  */
 export default function Payouts(props: Props) {
-    const { portal, tab, tabs, items, filters } = props;
+    const { portal, tab, tabs, items, filters, period } = props;
     const routes = portal === 'admin' ? adminPayouts : branchPayouts;
     const [search, setSearch] = useState(filters.search);
     const [openId, setOpenId] = useState<string | null>(props.selected);
     const [dialog, setDialog] = useState<Dialog>(null);
     const open = items.data.find((row) => row.id === openId) ?? null;
 
-    const visit = (next: Record<string, string | null>) =>
+    const visit = (next: Record<string, string | null | undefined>) =>
         router.get(
             routes.index({
                 query: Object.fromEntries(
-                    Object.entries({ tab, search, ...next }).filter(
-                        ([, v]) => v,
-                    ),
-                ),
+                    Object.entries({
+                        tab,
+                        ...('range' in next ? {} : periodQuery(period)),
+                        search,
+                        ...next,
+                    }).filter(([, v]) => v),
+                ) as Record<string, string>,
             }).url,
             {},
             { preserveState: true, replace: true },
@@ -202,7 +216,9 @@ export default function Payouts(props: Props) {
                             >
                                 {TAB_INFO[key].icon}
                             </span>
-                            {TAB_INFO[key].label}
+                            {period.range === 'today'
+                                ? TAB_INFO[key].label
+                                : TAB_INFO[key].label.replace(' today', '')}
                         </span>
                         <span className="text-lg font-semibold">
                             {tabs[key].count}
@@ -213,6 +229,21 @@ export default function Payouts(props: Props) {
                     </button>
                 ))}
             </div>
+
+            <Panel className="px-3 py-2.5">
+                <PeriodFilter period={period} onChange={visit} />
+                <p className="mt-1.5 text-[11.5px] text-tx3">
+                    The period applies to Paid and Failed by decision time, and
+                    to the other tabs by creation time.
+                </p>
+                <div className="mt-2 empty:hidden">
+                    <OlderOpenBanner
+                        older={props.older}
+                        noun={['payout', 'payouts']}
+                        onShow={visit}
+                    />
+                </div>
+            </Panel>
 
             <Panel className="flex items-center gap-2 px-3 py-2.5">
                 <label className="flex h-[30px] w-[300px] items-center gap-2 rounded-[7px] border border-ln px-2.5 text-tx3 focus-within:border-ac">
@@ -266,7 +297,8 @@ export default function Payouts(props: Props) {
                                         <span className="font-mono">
                                             {payout.reference}
                                         </span>{' '}
-                                        · {formatRelative(payout.created_at)}
+                                        · {formatDateTime(payout.created_at)} (
+                                        {formatRelative(payout.created_at)})
                                     </div>
                                 </div>
                                 <div className="flex flex-col items-end gap-1">
@@ -597,12 +629,13 @@ function CompleteDialog({
                 error={errors.bank_utr}
             >
                 <TextInput
+                    autoCapitalize="characters"
                     autoFocus
                     required
                     className="font-mono"
                     value={form.data.bank_utr}
                     onChange={(event) =>
-                        form.setData('bank_utr', event.target.value)
+                        form.setData('bank_utr', cleanUtr(event.target.value))
                     }
                 />
             </Field>

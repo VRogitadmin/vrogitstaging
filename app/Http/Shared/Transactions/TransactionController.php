@@ -39,21 +39,29 @@ class TransactionController extends Controller
             'hold' => ['under_review'],
             'success' => ['success'],
             'rejected' => ['rejected'],
-            'closed' => ['expired', 'cancelled'],
+            'closed' => ['expired'],
         ],
         'payout' => [
             'pending' => ['assigned'],
             'hold' => ['processing'],
             'success' => ['success'],
             'rejected' => ['failed', 'rejected', 'returned'],
-            'closed' => ['cancelled'],
         ],
     ];
 
     /**
-     * Still waiting for someone: listed whatever the period, as on Manual
-     * Deposit / Manual Payout, so All deposits / withdrawals never hide an
-     * open one (client request 2026-11-09).
+     * Not in the "All" tab, only in their own tab (client request
+     * 2026-11-19: expired deposits got in the way). A search still finds them.
+     */
+    public const ONLY_IN_OWN_TAB = [
+        'payin' => ['expired'],
+        'payout' => [],
+    ];
+
+    /**
+     * Still waiting for someone. The period applies to these too ("Today"
+     * is today only, client request 2026-11-18, superseding 2026-11-09);
+     * older ones are counted in a banner that shows them in one click.
      */
     public const WAITING = [
         'payin' => ['created', 'awaiting_payment', 'payment_submitted', 'payment_detected', 'under_review'],
@@ -88,21 +96,28 @@ class TransactionController extends Controller
         $selected = $request->query('txn');
 
         $filters = self::filters($request, $actor);
-        // Created in the period (Today by default), plus every one still
-        // waiting, any date (WAITING). The Chargebacks and Payout returns
-        // pages are work queues: every open case, any date.
+        // Created in the period (Today by default), strictly. The
+        // Chargebacks and Payout returns pages are work queues: every open
+        // case, any date.
         $period = $page === null ? Period::fromRequest($request) : null;
 
-        $base = fn () => self::filtered(self::scoped($actor)->where('direction', $direction), $filters)
-            ->when($period !== null, fn (Builder $query) => $query->where(fn (Builder $query) => $query
-                ->whereIn('status', self::WAITING[$direction])
-                ->orWhere(fn (Builder $query) => $period->apply($query, 'created_at'))));
+        $unfiltered = fn () => self::filtered(self::scoped($actor)->where('direction', $direction), $filters);
+        $base = fn () => $unfiltered()
+            ->when($period !== null, fn (Builder $query) => $query->where(fn (Builder $query) => $period->apply($query, 'created_at')));
+
+        // Open ones created before the period, in the tab shown.
+        $openStatuses = $group === null ? self::WAITING[$direction] : array_values(array_intersect(self::WAITING[$direction], $groups[$group] ?? []));
+        $older = $period === null || $openStatuses === [] ? null : $period->olderOpen(
+            $unfiltered()->whereIn('status', $openStatuses)->when($search !== '', fn (Builder $query) => self::search($query, $search)),
+            'transactions.created_at',
+        );
 
         $transactions = $base()
             ->with(self::ROW_RELATIONS)
             ->when($group === 'chargeback', fn (Builder $query) => self::withChargeback($query, $actor))
             ->when($group === 'return', fn (Builder $query) => $query->whereNotNull('return_status'))
             ->when($group !== null && $group !== 'chargeback' && $group !== 'return', fn (Builder $query) => $query->whereIn('status', $groups[(string) $group] ?? []))
+            ->when($group === null && $search === '' && self::ONLY_IN_OWN_TAB[$direction] !== [], fn (Builder $query) => $query->whereNotIn('status', self::ONLY_IN_OWN_TAB[$direction]))
             ->when($search !== '', fn (Builder $query) => self::search($query, $search))
             ->latest('created_at')
             ->paginate(25)
@@ -119,6 +134,7 @@ class TransactionController extends Controller
             ],
             'filters' => ['status' => $group, 'search' => $search, ...$filters],
             'period' => $period?->toArray(),
+            'older' => $older,
             ...self::filterOptions($actor),
             'summary' => collect($groups)->map(fn (array $statuses) => [
                 'count' => (int) $counts->whereIn('status', $statuses)->sum('total'),

@@ -5,6 +5,7 @@ use App\Http\Admin\Activity\OrganisationActivityController;
 use App\Http\Admin\Branches\BranchController;
 use App\Http\Admin\Commissions\CommissionController;
 use App\Http\Admin\Developer\PartnerApiDocsController;
+use App\Http\Admin\Guide\GuideController;
 use App\Http\Admin\Mappings\MappingController;
 use App\Http\Admin\Partners\PartnerController;
 use App\Http\Admin\Partners\PartnerIntegrationFileController;
@@ -14,8 +15,8 @@ use App\Http\Admin\Platform\PageController;
 use App\Http\Admin\Qa\QaChecklistController;
 use App\Http\Admin\Qa\SectionRolloutController;
 use App\Http\Admin\Reversals\ChargebackController;
-use App\Http\Admin\Reversals\ReversalController;
 use App\Http\Admin\Roles\RoleController;
+use App\Http\Admin\Security\SecurityReportController;
 use App\Http\Admin\Settings\GlobalSettingsController;
 use App\Http\Admin\Settlements\AdjustmentController;
 use App\Http\Shared\Accounts\AccountLogController;
@@ -86,7 +87,10 @@ Route::controller(StatementController::class)->prefix('statements')->name('state
 Route::controller(StatementImportController::class)->prefix('statements/imports')->name('statement-imports.')->group(function () {
     Route::get('/', 'index')->name('index');
     Route::post('preview', 'preview')->middleware('throttle:20,1')->name('preview');
+    Route::post('lines', 'lines')->middleware('throttle:30,1')->name('lines');
     Route::post('/', 'store')->name('store');
+    // Admin only: remove a wrong import's lines (client report 2026-11-18).
+    Route::post('{statementImport}/undo', 'undo')->name('undo');
     Route::delete('{token}', 'cancel')->name('cancel');
 });
 Route::controller(CaseController::class)->prefix('unsettled')->name('cases.')->group(function () {
@@ -118,9 +122,8 @@ Route::controller(AdjustmentController::class)->prefix('settlements/adjustments'
 });
 Route::get('commissions', [CommissionController::class, 'index'])->name('commissions.index');
 
-// Refunds (pay-in refunds, returned payouts), and chargebacks raised by branches.
-Route::get('refunds', [ReversalController::class, 'index'])->name('refunds.index');
-Route::post('reversals', [ReversalController::class, 'store'])->name('reversals.store');
+// Deposit refunds were removed (client request 2026-11-18). Chargebacks
+// raised by branches:
 Route::controller(ChargebackController::class)->prefix('chargebacks')->name('chargebacks.')->group(function () {
     Route::get('/', 'index')->name('index');
     Route::post('{chargeback}/approve', 'approve')->name('approve');
@@ -159,6 +162,9 @@ Route::controller(PartnerController::class)->prefix('partners')->name('partners.
     Route::put('{partner}/direction', 'direction')->name('direction');
     Route::put('{partner}/limits', 'limits')->name('limits');
 });
+// Guide: the whole system explained in simple English (every admin).
+Route::get('guide', [GuideController::class, 'show'])->name('guide');
+
 // Developer › Partner API Docs: the standard integration guide (page, preview, PDF).
 Route::controller(PartnerApiDocsController::class)->prefix('partner-api-docs')->name('partner-api-docs.')->group(function () {
     Route::get('/', 'show')->name('show');
@@ -240,6 +246,17 @@ Route::controller(QaChecklistController::class)->prefix('qa-checklist')->name('q
     Route::post('run', 'run')->middleware('throttle:30,1')->name('run');
     Route::post('sample', 'sample')->middleware('throttle:30,1')->name('sample');
     Route::put('{key}', 'mark')->name('mark');
+});
+
+// Security Report (super admins only, every environment): automated scan,
+// manual tests, findings, client decisions; HTML preview and PDF for the client.
+Route::controller(SecurityReportController::class)->prefix('security-report')->name('security-report.')->group(function () {
+    Route::get('/', 'index')->name('index');
+    Route::post('scan', 'scan')->middleware('throttle:6,1')->name('scan');
+    Route::put('details', 'details')->name('details');
+    Route::get('preview', 'preview')->name('preview');
+    Route::get('download', 'download')->middleware('throttle:20,1')->name('download');
+    Route::put('entries/{key}', 'mark')->where('key', '[a-z0-9._]+')->name('mark');
 });
 
 // Section rollout (super admins only): which sections other users see,

@@ -182,45 +182,49 @@ class StatementMatchingTest extends TestCase
         $this->assertSame(1, StatementEntry::count());
     }
 
-    public function test_approving_a_short_payment_for_the_amount_received_closes_its_amount_mismatch_case()
+    /**
+     * Client request 2026-11-17: an amount mismatch is only declined. A typo
+     * in the bank line is corrected by Admin, and the deposit then matches.
+     */
+    public function test_an_amount_mismatch_is_never_approved_only_declined_or_corrected_by_admin()
     {
         $payin = $this->submittedPayin(['amount' => 500000]);
         $this->addLine(['credit' => '500'])->assertSessionHasNoErrors();
         $case = ReconciliationCase::sole();
         $this->assertSame('amount_mismatch', $case->type->value);
 
-        $candidates = $this->partial($this->owner, route('branch.cases.index', ['case' => $case->id]), 'reconciliation/cases', 'candidates')->json('props.candidates');
-        $this->assertSame([[$payin->reference, false]], array_map(fn (array $candidate) => [$candidate['reference'], $candidate['same_amount']], $candidates));
-        $this->actingAs($this->owner)->post(route('branch.cases.link', $case), ['transaction_id' => $payin->id])
-            ->assertSessionHasErrors('transaction');
-
+        // Not for what the bank shows, and not for the order amount either.
         $this->actingAs($this->operator)->post(route('branch.deposits.approve', $payin), ['bank_utr' => '626812820491', 'received_amount' => '500', 'note' => 'Paid 500 only'])
-            ->assertSessionHasNoErrors();
+            ->assertSessionHasErrors('received_amount');
+        $this->actingAs($this->operator)->post(route('branch.deposits.approve', $payin), ['bank_utr' => '626812820491'])
+            ->assertSessionHasErrors('bank_utr');
+        $this->assertSame('payment_submitted', $payin->fresh()?->status);
 
-        $this->assertSame('reconciled', $this->line()->status);
+        // The branch typed ₹500 for ₹5,000: Admin corrects the line and it matches.
+        $this->actingAs($this->admin)->post(route('admin.cases.edit-line', $case), ['utr' => '626812820491', 'amount' => '5000', 'note' => 'Typo: the bank shows 5,000'])
+            ->assertSessionHasNoErrors();
         $this->assertSame($payin->id, $this->line()->transaction_id);
         $this->assertSame('resolved', $case->refresh()->status);
     }
 
-    public function test_money_for_a_declined_deposit_with_another_amount_is_approved_late_for_what_arrived()
+    public function test_a_declined_amount_mismatch_keeps_its_case_and_is_never_approved_late()
     {
         $payin = $this->submittedPayin(['amount' => 500000]);
-        $this->actingAs($this->operator)->post(route('branch.deposits.decline', $payin), ['reason_code' => 'wrong_amount'])->assertSessionHasNoErrors();
-
         $this->addLine(['credit' => '500'])->assertSessionHasNoErrors();
         $case = ReconciliationCase::sole();
-        $this->assertSame('late_payment', $case->type->value);
-        $this->assertStringContainsString('500.00', (string) $case->notes);
 
-        $this->actingAs($this->admin)->post(route('admin.cases.approve-late', $case), ['transaction_id' => $payin->id])->assertSessionHasNoErrors();
+        $this->actingAs($this->operator)->post(route('branch.deposits.decline', $payin), ['reason_code' => 'wrong_amount'])->assertSessionHasNoErrors();
+        $this->assertSame('rejected', $payin->refresh()->status);
+        $this->assertSame('open', $case->refresh()->status);
+        $this->assertSame('amount_mismatch', $case->type->value);
 
-        $payin->refresh();
-        $this->assertSame('success', $payin->status);
-        $this->assertSame(50000, $payin->amount);
-        $this->assertSame(500000, $payin->order_amount);
-        $this->assertSame(50000 - 3000, app(Ledger::class)->balance(Ledger::PARTNER_POSITION, $this->partner->id, $this->branch->id));
-        $this->assertSame('reconciled', $this->line()->status);
-        $this->assertSame('resolved', $case->refresh()->status);
+        // A late approval is for the exact amount only.
+        $late = $this->submittedPayin(['amount' => 500000], '626812820492');
+        $this->actingAs($this->operator)->post(route('branch.deposits.decline', $late), ['reason_code' => 'wrong_amount'])->assertSessionHasNoErrors();
+        $this->addLine(['credit' => '500', 'utr' => '626812820492'])->assertSessionHasNoErrors();
+        $lateCase = ReconciliationCase::where('type', 'late_payment')->sole();
+        $this->actingAs($this->admin)->post(route('admin.cases.approve-late', $lateCase), ['transaction_id' => $late->id])->assertSessionHasErrors('transaction');
+        $this->assertSame('rejected', $late->refresh()->status);
     }
 
     public function test_a_utr_of_another_branchs_deposit_is_a_wrong_branch_case()
@@ -265,6 +269,60 @@ class StatementMatchingTest extends TestCase
         $this->assertSame('resolved', $case->status);
         $this->assertSame('linked', $case->resolution->value);
         $this->assertNull($case->resolved_by); // the system
+    }
+
+    public function test_a_line_on_another_branch_that_arrived_first_points_at_the_deposit_when_the_customer_claims_it()
+    {
+        // Client report 2026-11-18: the money landed on this branch's account
+        // (imported first, "UTR not found"); the customer then submitted the
+        // UTR on a deposit of another branch. The case stayed "UTR not found".
+        $other = Branch::factory()->create();
+        $this->mapPair($this->partner, $other);
+        $otherAccount = $this->activeAccount($other);
+        $this->account->update(['status' => 'inactive']);
+        [$reference, $token] = $this->createPayin(['amount' => 500000]);
+        $this->post("http://pay.a27pay.local/p/{$token}/method", ['method' => 'upi']);
+        $this->account->update(['status' => 'active']);
+
+        $this->addLine()->assertSessionHasNoErrors();
+        $case = ReconciliationCase::sole();
+        $this->assertSame('utr_not_found', $case->type->value);
+
+        $this->postProof($token, '626812820491')->assertSessionHasNoErrors();
+
+        // Now as if the deposit had come first: a Wrong branch case on it.
+        $payin = Transaction::where('reference', $reference)->firstOrFail();
+        $this->assertSame($otherAccount->id, $payin->payment_account_id);
+        $case->refresh();
+        $this->assertSame('wrong_branch', $case->type->value);
+        $this->assertSame($payin->id, $case->transaction_id);
+        $this->assertSame('open', $case->status);
+        $this->assertSame('unmatched', $this->line()->status);
+    }
+
+    public function test_the_recheck_command_repairs_cases_left_as_utr_not_found()
+    {
+        $other = Branch::factory()->create();
+        $this->mapPair($this->partner, $other);
+        $this->activeAccount($other);
+        $this->account->update(['status' => 'inactive']);
+        [$reference, $token] = $this->createPayin(['amount' => 500000]);
+        $this->post("http://pay.a27pay.local/p/{$token}/method", ['method' => 'upi']);
+        $this->account->update(['status' => 'active']);
+        $this->addLine()->assertSessionHasNoErrors();
+        $this->postProof($token, '626812820491')->assertSessionHasNoErrors();
+
+        // As left behind before the fix: back to "UTR not found", no deposit.
+        $case = ReconciliationCase::sole();
+        $case->forceFill(['type' => 'utr_not_found', 'transaction_id' => null])->save();
+
+        $this->artisan('reconciliation:recheck')->expectsOutputToContain('1 “UTR not found” case(s) now point at their deposit.')->assertSuccessful();
+
+        $case->refresh();
+        $this->assertSame('wrong_branch', $case->type->value);
+        $this->assertSame(Transaction::where('reference', $reference)->value('id'), $case->transaction_id);
+        // Running it again changes nothing.
+        $this->artisan('reconciliation:recheck')->expectsOutputToContain('0 “UTR not found”')->assertSuccessful();
     }
 
     public function test_declining_a_deposit_whose_credit_was_found_opens_a_late_payment_case_admin_can_approve()
@@ -335,7 +393,9 @@ class StatementMatchingTest extends TestCase
 
         $this->addLine()->assertSessionHasNoErrors();
         $case = ReconciliationCase::sole();
-        $this->assertSame('wrong_branch', $case->type->value);
+        // Same branch, other account: a wrong bank account, not a wrong branch.
+        $this->assertSame('wrong_account', $case->type->value);
+        $this->assertStringContainsString($second->label, (string) $case->notes);
 
         return [$second, $payin, $case];
     }
@@ -376,7 +436,7 @@ class StatementMatchingTest extends TestCase
         // Typed again under the right account: refused while the wrong line holds the UTR.
         $this->addLine(['payment_account_id' => $second->id])->assertSessionHasErrors('utr');
 
-        $this->actingAs($this->owner)->post(route('branch.cases.close', $wrong), ['resolution' => 'rejected', 'note' => 'Typed under the wrong account by mistake'])
+        $this->actingAs($this->admin)->post(route('admin.cases.close', $wrong), ['resolution' => 'rejected', 'note' => 'Typed under the wrong account by mistake'])
             ->assertSessionHasNoErrors();
 
         // Closed as not a customer payment, the wrong line no longer holds it.
@@ -421,6 +481,41 @@ class StatementMatchingTest extends TestCase
         $this->actingAs($this->admin)->post($url, [...$fix, 'amount' => '4000'])->assertSessionHasErrors('case');
     }
 
+    /**
+     * Client report 2026-11-17: a line with a UTR offered every deposit of
+     * the same amount. It offers only the deposit with its UTR, and linking
+     * another UTR is refused.
+     */
+    public function test_a_line_with_a_utr_offers_and_links_only_the_deposit_with_that_utr()
+    {
+        $payin = $this->submittedPayin(['amount' => 500000]);
+        $other = $this->submittedPayin(['amount' => 600000], '626812820492');
+        $sameAmount = $this->submittedPayin(['amount' => 600000], '626812820493');
+
+        // The bank shows ₹6,000 with $payin's UTR (₹5,000).
+        $this->addLine(['credit' => '6000'])->assertSessionHasNoErrors();
+        $case = ReconciliationCase::sole();
+        $this->assertSame('amount_mismatch', $case->type->value);
+
+        $candidates = $this->partial($this->owner, route('branch.cases.index', ['case' => $case->id]), 'reconciliation/cases', 'candidates')->json('props.candidates');
+        $this->assertSame([$payin->reference], array_column($candidates, 'reference'));
+
+        // Same amount and account, another UTR: refused.
+        $this->actingAs($this->owner)->post(route('branch.cases.link', $case), ['transaction_id' => $sameAmount->id])
+            ->assertSessionHasErrors('transaction');
+        $this->actingAs($this->admin)->post(route('admin.cases.link', $case), ['transaction_id' => $other->id])
+            ->assertSessionHasErrors('transaction');
+        $this->assertNull($this->line()->transaction_id);
+    }
+
+    /** Client request 2026-11-18: a bank line's UTR is numbers or a NEFT / RTGS reference. */
+    public function test_a_bank_line_takes_a_number_or_a_neft_rtgs_reference_only()
+    {
+        $this->addLine(['utr' => 'UTR-REF-77'])->assertSessionHasErrors('utr');
+        $this->addLine(['utr' => 'SBINR52026092812345678', 'description' => 'RTGS'])->assertSessionHasNoErrors();
+        $this->assertSame('SBINR52026092812345678', StatementEntry::sole()->utr_normalized);
+    }
+
     public function test_a_line_without_utr_is_linked_by_hand_only_to_the_same_amount()
     {
         $payin = $this->submittedPayin(['amount' => 500000]);
@@ -452,17 +547,22 @@ class StatementMatchingTest extends TestCase
         $this->addLine(['utr' => '', 'description' => 'SMS CHARGES', 'credit' => '', 'debit' => '17.70'])->assertSessionHasNoErrors();
         $charges = ReconciliationCase::sole();
 
-        $this->actingAs($this->owner)->post(route('branch.cases.close', $charges), ['resolution' => 'refunded', 'note' => 'x'])
-            ->assertSessionHasErrors('resolution');
+        // Only Admin closes a line (client request 2026-11-17).
         $this->actingAs($this->owner)->post(route('branch.cases.close', $charges), ['resolution' => 'rejected', 'note' => 'Bank SMS charges'])
+            ->assertSessionHasErrors('resolution');
+        $this->assertSame('open', $charges->refresh()->status);
+
+        $this->actingAs($this->admin)->post(route('admin.cases.close', $charges), ['resolution' => 'refunded', 'note' => 'x'])
+            ->assertSessionHasErrors('resolution');
+        $this->actingAs($this->admin)->post(route('admin.cases.close', $charges), ['resolution' => 'rejected', 'note' => 'Bank SMS charges'])
             ->assertSessionHasNoErrors();
 
         $this->assertSame('ignored', StatementEntry::sole()->status);
         $this->assertSame('rejected', $charges->refresh()->resolution->value);
-        $this->assertDatabaseHas('audit_logs', ['action' => 'reconciliation.case_resolved', 'subject_id' => $charges->id, 'actor_id' => $this->owner->id]);
+        $this->assertDatabaseHas('audit_logs', ['action' => 'reconciliation.case_resolved', 'subject_id' => $charges->id, 'actor_id' => $this->admin->id]);
 
         // Already resolved.
-        $this->actingAs($this->owner)->post(route('branch.cases.close', $charges), ['resolution' => 'rejected', 'note' => 'again'])
+        $this->actingAs($this->admin)->post(route('admin.cases.close', $charges), ['resolution' => 'rejected', 'note' => 'again'])
             ->assertSessionHasErrors('case');
     }
 
@@ -478,20 +578,82 @@ class StatementMatchingTest extends TestCase
             'status' => 'processing',
         ]);
 
-        $this->addLine(['utr' => 'IMPS601234567890', 'credit' => '', 'debit' => '2500'])->assertSessionHasNoErrors();
+        $this->addLine(['utr' => '601234567890', 'credit' => '', 'debit' => '2500'])->assertSessionHasNoErrors();
         $this->assertSame('utr_not_found', ReconciliationCase::sole()->type->value);
 
         // The branch records that transfer: the waiting debit links itself to it.
         $part = PayoutPayment::create([
             'transaction_id' => $payout->id, 'branch_id' => $this->branch->id, 'amount' => 250000,
-            'utr' => 'IMPS601234567890', 'utr_normalized' => 'IMPS601234567890', 'paid_at' => now(), 'created_at' => now(),
+            'utr' => '601234567890', 'utr_normalized' => '601234567890', 'paid_at' => now(), 'created_at' => now(),
         ]);
-        $payout->forceFill(['status' => 'success', 'bank_utr_normalized' => 'IMPS601234567890', 'partner_commission' => 0, 'branch_commission' => 0, 'platform_margin' => 0, 'succeeded_at' => now()])->save();
+        $payout->forceFill(['status' => 'success', 'bank_utr_normalized' => '601234567890', 'partner_commission' => 0, 'branch_commission' => 0, 'platform_margin' => 0, 'succeeded_at' => now()])->save();
         DB::transaction(fn () => app(StatementMatcher::class)->payoutPartPaid($part, $payout));
 
-        $this->assertSame('reconciled', $this->line('IMPS601234567890')->status);
-        $this->assertSame($part->id, $this->line('IMPS601234567890')->payout_payment_id);
+        $this->assertSame('reconciled', $this->line('601234567890')->status);
+        $this->assertSame($part->id, $this->line('601234567890')->payout_payment_id);
         $this->assertSame('resolved', ReconciliationCase::sole()->status);
+    }
+
+    public function test_a_later_transfer_of_a_payout_paid_in_parts_is_offered_and_linked_by_hand()
+    {
+        $payout = Transaction::create([
+            'reference' => Transaction::newPayoutReference(),
+            'direction' => 'payout',
+            'partner_id' => $this->partner->id,
+            'partner_transaction_id' => 'WD-2',
+            'branch_id' => $this->branch->id,
+            'amount' => 500000,
+            'status' => 'processing',
+        ]);
+        $first = PayoutPayment::create([
+            'transaction_id' => $payout->id, 'branch_id' => $this->branch->id, 'amount' => 250000,
+            'utr' => '601234567891', 'utr_normalized' => '601234567891', 'paid_at' => now(), 'created_at' => now(),
+        ]);
+        $second = PayoutPayment::create([
+            'transaction_id' => $payout->id, 'branch_id' => $this->branch->id, 'amount' => 250000,
+            'utr' => '601234567892', 'utr_normalized' => '601234567892', 'paid_at' => now(), 'created_at' => now(),
+        ]);
+
+        // The first transfer's line links itself; the second's shows another UTR.
+        $this->addLine(['utr' => '601234567891', 'credit' => '', 'debit' => '2500'])->assertSessionHasNoErrors();
+        $this->assertSame($first->id, $this->line('601234567891')->payout_payment_id);
+        $this->addLine(['utr' => '609999999999', 'credit' => '', 'debit' => '2500'])->assertSessionHasNoErrors();
+        $case = ReconciliationCase::where('status', 'open')->sole();
+
+        // The payout already has a line, but its second transfer doesn't.
+        $candidates = $this->partial($this->owner, route('branch.cases.index', ['case' => $case->id]), 'reconciliation/cases', 'candidates')->json('props.candidates');
+        $this->assertSame([[$payout->reference, true]], array_map(fn (array $candidate) => [$candidate['reference'], $candidate['same_amount']], $candidates));
+
+        $this->actingAs($this->owner)->post(route('branch.cases.link', $case), ['transaction_id' => $payout->id])->assertSessionHasNoErrors();
+        $this->assertSame($second->id, $this->line('609999999999')->payout_payment_id);
+
+        // Both transfers have a line now: nothing left to offer.
+        $this->addLine(['utr' => '608888888888', 'credit' => '', 'debit' => '2500'])->assertSessionHasNoErrors();
+        $next = ReconciliationCase::where('status', 'open')->sole();
+        $this->assertSame([], $this->partial($this->owner, route('branch.cases.index', ['case' => $next->id]), 'reconciliation/cases', 'candidates')->json('props.candidates'));
+    }
+
+    public function test_a_case_opened_by_link_is_sent_even_when_it_is_not_on_the_first_page()
+    {
+        $this->addLine(['utr' => '', 'description' => 'OLDEST', 'credit' => '100'])->assertSessionHasNoErrors();
+        $oldest = ReconciliationCase::sole();
+        $oldest->forceFill(['created_at' => now()->subDay()])->save();
+
+        foreach (range(1, 30) as $i) {
+            $this->addLine(['utr' => '', 'description' => "LINE {$i}", 'credit' => (string) (100 + $i)])->assertSessionHasNoErrors();
+        }
+
+        $this->actingAs($this->owner)->get(route('branch.cases.index', ['case' => $oldest->id]))
+            ->assertInertia(fn ($page) => $page
+                ->component('reconciliation/cases')
+                ->count('cases.data', 30)
+                ->where('selected_case.id', $oldest->id)
+                ->where('selected_case.reference', $oldest->reference));
+
+        // A case on the page needs no extra row.
+        $newest = ReconciliationCase::orderByDesc('created_at')->first();
+        $this->actingAs($this->owner)->get(route('branch.cases.index', ['case' => $newest->id]))
+            ->assertInertia(fn ($page) => $page->where('selected_case', null));
     }
 
     public function test_branches_see_only_their_own_lines_and_cases()

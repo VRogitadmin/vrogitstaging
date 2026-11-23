@@ -15,6 +15,7 @@ import { formatDateTime } from '@/lib/dates';
 import { formatPaise } from '@/lib/money';
 import { cn } from '@/lib/utils';
 import checkout from '@/routes/pay/checkout';
+import { cleanUtr } from '@/lib/utr';
 
 type Method = 'upi' | 'qr' | 'bank_transfer';
 
@@ -37,6 +38,7 @@ type Props = {
         expires_at: string | null;
         submitted_at: string | null;
         completed_at: string | null;
+        amount_mismatch: boolean;
     };
     server_time: string;
     methods: Method[];
@@ -144,7 +146,28 @@ export default function Checkout(props: Props) {
                             onChooseAnother={() => setChoosing(true)}
                         />
                     )}
-                    {waiting && (
+                    {waiting && payin.amount_mismatch && (
+                        <Result
+                            tone="failed"
+                            title="The amount doesn’t match"
+                            body={`The bank received UTR ${payin.utr}, but not for ${formatPaise(payin.amount)}. Only the exact amount of this order can be added to your ${partner.name} account.`}
+                            rows={[
+                                ['Order amount', formatPaise(payin.amount)],
+                                ['UTR', payin.utr ?? '—'],
+                                ['Order ID', payin.order_id],
+                            ]}
+                            note={`Check the UTR and the amount you paid in your UPI or bank app. If you paid a different amount, this order will be declined: contact ${partner.name} support with your Order ID and UTR.`}
+                            action={
+                                props.return_url
+                                    ? {
+                                          label: `Back to ${partner.name}`,
+                                          href: props.return_url,
+                                      }
+                                    : undefined
+                            }
+                        />
+                    )}
+                    {waiting && !payin.amount_mismatch && (
                         <Result
                             tone="pending"
                             title="Verifying your payment"
@@ -154,7 +177,7 @@ export default function Checkout(props: Props) {
                                 ['UTR', payin.utr ?? 'Screenshot sent'],
                                 ['Order ID', payin.order_id],
                             ]}
-                            note={`Your payment will reflect in your ${partner.name} account within a few minutes. The amount that actually reached us under this UTR is what gets added, so if you paid a different amount, that amount is credited. You don’t need to wait on this page.`}
+                            note={`Your payment will reflect in your ${partner.name} account within a few minutes. Only the exact amount of this order is added, so pay exactly ${formatPaise(payin.amount)}. You don’t need to wait on this page.`}
                             action={
                                 props.return_url
                                     ? {
@@ -213,22 +236,17 @@ export default function Checkout(props: Props) {
                             }
                         />
                     )}
-                    {(status === 'expired' || status === 'cancelled') && (
+                    {status === 'expired' && (
                         <Result
                             tone="expired"
-                            title={
-                                status === 'expired'
-                                    ? 'Payment session expired'
-                                    : 'Payment cancelled'
-                            }
+                            title="Payment session expired"
                             body="Do not transfer to the old account details. Start a new payment from the merchant’s site instead."
+                            note={`Already paid before the time ran out? Your money is not lost. Keep your UTR and payment screenshot, and contact ${partner.name} support with Order ID ${payin.order_id}: the payment is checked against the bank and credited.`}
                             rows={[
                                 ['Amount', formatPaise(payin.amount)],
                                 ['Order ID', payin.order_id],
                                 [
-                                    status === 'expired'
-                                        ? 'Expired at'
-                                        : 'Cancelled at',
+                                    'Expired at',
                                     formatDateTime(
                                         payin.completed_at ?? payin.expires_at,
                                     ),
@@ -301,17 +319,20 @@ export default function Checkout(props: Props) {
     );
 }
 
-function AmountCard({
-    payin,
-    server_time,
-    ticking,
-}: Props & { ticking: boolean }) {
+/**
+ * Seconds left in the payment session, by the server's clock. With `expire`,
+ * the page reloads when time is up so the server shows the expired state.
+ */
+function useSecondsLeft(
+    expiresAt: string | null,
+    serverTime: string,
+    ticking: boolean,
+    expire = false,
+): { left: number | null; deadline: number | null } {
     const [offset] = useState(
-        () => new Date(server_time).getTime() - Date.now(),
+        () => new Date(serverTime).getTime() - Date.now(),
     );
-    const deadline = payin.expires_at
-        ? new Date(payin.expires_at).getTime()
-        : null;
+    const deadline = expiresAt ? new Date(expiresAt).getTime() : null;
     const [now, setNow] = useState(() => Date.now() + offset);
 
     useEffect(() => {
@@ -323,17 +344,50 @@ function AmountCard({
             // Time is up: let the server expire it and show the expired state.
             if (current >= deadline) {
                 clearInterval(timer);
-                router.reload();
+                if (expire) router.reload();
             }
         }, 1000);
 
         return () => clearInterval(timer);
-    }, [ticking, deadline, offset]);
+    }, [ticking, deadline, offset, expire]);
 
-    const left =
-        deadline === null
-            ? null
-            : Math.max(0, Math.floor((deadline - now) / 1000));
+    return {
+        deadline,
+        left:
+            deadline === null
+                ? null
+                : Math.max(0, Math.floor((deadline - now) / 1000)),
+    };
+}
+
+/** Why "I've made the payment" failed, when it isn't a field error. */
+function submitProblem(status: number, maxKb: number): string {
+    switch (status) {
+        case 413:
+            return `The screenshot is too large. Upload one under ${Math.round(maxKb / 1024)} MB.`;
+        case 419:
+            return 'This page was open too long and needs a refresh. Refresh the page, then enter the UTR and screenshot again.';
+        case 429:
+            return 'Too many tries in a short time. Wait one minute, then tap “I’ve made the payment” again.';
+        case 404:
+        case 410:
+            return 'This payment link is no longer valid. If you already paid, contact the merchant’s support with your Order ID and UTR.';
+        default:
+            return 'Something went wrong on our side and your details were not saved. Your money is safe: wait a moment and tap “I’ve made the payment” again. If it keeps happening, contact the merchant’s support with your Order ID and UTR.';
+    }
+}
+
+function AmountCard({
+    payin,
+    server_time,
+    ticking,
+}: Props & { ticking: boolean }) {
+    const { left, deadline } = useSecondsLeft(
+        payin.expires_at,
+        server_time,
+        ticking,
+        true,
+    );
     const total =
         deadline === null || payin.created_at === null
             ? 1
@@ -464,12 +518,55 @@ function PayView({
     account,
     methods,
     proof,
+    server_time,
     onChooseAnother,
 }: Props & { onChooseAnother: () => void }) {
     const form = useForm<{ utr: string; photo: File | null }>({
         utr: '',
         photo: null,
     });
+    // A failure that isn't about one field (time out, too many tries, server).
+    const [problem, setProblem] = useState<string | null>(null);
+    const { left } = useSecondsLeft(payin.expires_at, server_time, true);
+    const fieldError =
+        form.errors.utr ??
+        form.errors.photo ??
+        Object.values(form.errors as Record<string, string>)[0];
+
+    const choosePhoto = (file: File | null) => {
+        setProblem(null);
+        form.clearErrors('photo');
+
+        if (file === null) {
+            form.setData('photo', null);
+
+            return;
+        }
+
+        const extension = file.name.split('.').pop()?.toLowerCase() ?? '';
+
+        if (!proof.types.includes(extension)) {
+            form.setData('photo', null);
+            form.setError(
+                'photo',
+                `This file type can’t be used. Upload a screenshot as ${proof.types.join(', ').toUpperCase()}.`,
+            );
+
+            return;
+        }
+
+        if (file.size > proof.max_kb * 1024) {
+            form.setData('photo', null);
+            form.setError(
+                'photo',
+                `The screenshot is too large (${(file.size / 1024 / 1024).toFixed(1)} MB). Upload one under ${Math.round(proof.max_kb / 1024)} MB.`,
+            );
+
+            return;
+        }
+
+        form.setData('photo', file);
+    };
     const switcher = useForm({ method: '' as string });
     const tabs = methods.filter((method) => account!.supports.includes(method));
     const current = (payin.method ?? tabs[0]) as Method;
@@ -601,28 +698,72 @@ function PayView({
                 className="flex flex-col gap-3 border-t border-[#EEF0F3] pt-3"
                 onSubmit={(event) => {
                     event.preventDefault();
+                    setProblem(null);
                     form.post(checkout.proof(token).url, {
                         forceFormData: true,
                         preserveScroll: true,
+                        onHttpException: (response) => {
+                            setProblem(
+                                submitProblem(response.status, proof.max_kb),
+                            );
+
+                            return false;
+                        },
+                        onNetworkError: () => {
+                            setProblem(
+                                'No internet connection. Check your connection, then tap “I’ve made the payment” again. Your details are still filled in.',
+                            );
+
+                            return false;
+                        },
                     });
                 }}
             >
+                {left !== null && left > 0 && left <= 120 && (
+                    <div
+                        role="alert"
+                        className="rounded-xl border border-[#FECACA] bg-[#FEF2F2] px-3 py-2.5 text-[12.5px] text-[#B91C1C]"
+                    >
+                        <b>
+                            {left < 60
+                                ? 'Less than a minute left.'
+                                : 'Less than 2 minutes left.'}
+                        </b>{' '}
+                        Already paid? Enter the UTR and upload the screenshot
+                        now, before this payment expires.
+                    </div>
+                )}
                 <label className="flex flex-col gap-1.5 text-[13px] font-medium">
                     <span>
                         UTR / reference number{' '}
                         <span className="text-[#B91C1C]">*</span>{' '}
                         <span className="font-normal text-[#64748B]">
-                            (from your bank or UPI app)
+                            {current === 'bank_transfer'
+                                ? '(12-digit IMPS number, or NEFT / RTGS reference)'
+                                : '(12 digits, from your UPI app)'}
                         </span>
                     </span>
                     <input
                         required
-                        inputMode="text"
+                        inputMode={
+                            current === 'bank_transfer' ? 'text' : 'numeric'
+                        }
+                        autoCapitalize="characters"
                         autoComplete="off"
-                        placeholder="e.g. 626812820491"
+                        placeholder={
+                            current === 'bank_transfer'
+                                ? 'e.g. 626812820491 or HDFCN52026092812'
+                                : 'e.g. 626812820491'
+                        }
                         value={form.data.utr}
                         onChange={(event) =>
-                            form.setData('utr', event.target.value)
+                            form.setData(
+                                'utr',
+                                cleanUtr(
+                                    event.target.value,
+                                    current === 'bank_transfer',
+                                ),
+                            )
                         }
                         className="h-11 rounded-xl border border-[#E4E7EC] px-3 font-mono text-[15px] outline-none focus:border-ac focus:ring-[3px] focus:ring-acs"
                     />
@@ -650,22 +791,24 @@ function PayView({
                             <X className="size-4" />
                         </button>
                     )}
+                    {/* No `required`: the browser's warning would point at a
+                        hidden input; the button stays disabled until a
+                        screenshot is chosen, and says so. */}
                     <input
                         type="file"
-                        required
                         className="sr-only"
                         accept={proof.types.map((type) => `.${type}`).join(',')}
                         onChange={(event) =>
-                            form.setData(
-                                'photo',
-                                event.target.files?.[0] ?? null,
-                            )
+                            choosePhoto(event.target.files?.[0] ?? null)
                         }
                     />
                 </label>
-                {(form.errors.utr || form.errors.photo) && (
-                    <p className="text-[12.5px] text-[#B91C1C]">
-                        {form.errors.utr ?? form.errors.photo}
+                {(fieldError || problem) && (
+                    <p
+                        role="alert"
+                        className="rounded-lg bg-[#FEF2F2] px-3 py-2 text-[12.5px] text-[#B91C1C]"
+                    >
+                        {fieldError ?? problem}
                     </p>
                 )}
                 <button
@@ -677,8 +820,20 @@ function PayView({
                     }
                     className="h-12 rounded-xl bg-brand text-[15px] font-semibold text-white disabled:opacity-50"
                 >
-                    I’ve made the payment
+                    {form.processing ? 'Sending…' : 'I’ve made the payment'}
                 </button>
+                {!form.processing &&
+                    (form.data.utr.trim() === '' ||
+                        form.data.photo === null) && (
+                        <p className="-mt-1 text-center text-[12px] text-[#64748B]">
+                            {form.data.utr.trim() === '' &&
+                            form.data.photo === null
+                                ? 'Enter the UTR and upload the screenshot to continue.'
+                                : form.data.utr.trim() === ''
+                                  ? 'Enter the UTR to continue.'
+                                  : 'Upload the screenshot to continue.'}
+                        </p>
+                    )}
             </form>
             <button
                 type="button"
@@ -876,8 +1031,8 @@ function YonoWarning() {
                     may fail.
                 </span>
                 <span lang="hi">
-                    कृपया UPI भुगतान के लिए Yono SBI का उपयोग न करें, क्योंकि
-                    भुगतान असफल हो सकता है।
+                    कृपया UPI भुगतान के लिए Yono SBI का उपयोग न करें, क्योंकि भुगतान
+                    असफल हो सकता है।
                 </span>
             </div>
         </div>
@@ -893,10 +1048,10 @@ function PaymentRules() {
                 request.
             </span>
             <span>
-                - Do not save the details of our collection account, such as
-                the UPI ID or QR code for the next payment. We frequently update
-                our collection accounts and using old details may result in
-                money loss.
+                - Do not save the details of our collection account, such as the
+                UPI ID or QR code for the next payment. We frequently update our
+                collection accounts and using old details may result in money
+                loss.
             </span>
         </div>
     );

@@ -17,6 +17,7 @@ use App\Domain\Partner\Models\PartnerApiKey;
 use App\Domain\PaymentAccount\Enums\AccountStatus;
 use App\Domain\PaymentAccount\Enums\AccountVerification;
 use App\Domain\PaymentAccount\Models\PaymentAccount;
+use App\Support\ApiEnvironment;
 use App\Support\Crypto\BlindIndex;
 use Illuminate\Database\Seeder;
 use Illuminate\Support\Collection;
@@ -95,6 +96,11 @@ class TestPartnerSeeder extends Seeder
 
     public function run(): void
     {
+        // Test partners with fixed keys never go on the live server (2026-11-23).
+        if (ApiEnvironment::isLive()) {
+            throw new RuntimeException('TestPartnerSeeder is for sandbox / testbox only: this is the live server (PAYGATE_ENVIRONMENT).');
+        }
+
         $partnerRole = Role::bySlug(SystemRoles::PARTNER_OWNER);
         $branchRole = Role::bySlug(SystemRoles::BRANCH_OWNER);
 
@@ -108,7 +114,9 @@ class TestPartnerSeeder extends Seeder
                 $this->rate('partner', $partner->id, 'partner', Direction::Withdrawal, '4');
                 $this->branches($partner, $branches);
                 $this->login($partner, $partnerRole, $entry['username'], UserType::Partner);
-                $this->key($partner, $entry['key_id'], $entry['secret']);
+                // pk_test_partner1 on testbox, pk_sb_partner1 on sandbox (each server's prefix).
+                $word = ApiEnvironment::keyPrefix();
+                $this->key($partner, str_replace('pk_test_', "pk_{$word}_", $entry['key_id']), str_replace('sk_test_', "sk_{$word}_", $entry['secret']));
             }
         });
 

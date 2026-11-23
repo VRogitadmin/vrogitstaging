@@ -17,7 +17,6 @@ use App\Domain\Payout\PayoutReservation;
 use App\Domain\Payout\PayoutRouter;
 use App\Domain\Platform\Models\StoredFile;
 use App\Domain\Reconciliation\StatementMatcher;
-use App\Domain\Transaction\Actions\SubmitPayinProof;
 use App\Domain\Transaction\Models\Transaction;
 use App\Domain\Transaction\Models\TransactionEvent;
 use App\Domain\Transaction\Utr;
@@ -44,7 +43,7 @@ use Illuminate\Validation\ValidationException;
  * - fail: the branch couldn't pay → failed, the hold is released and the
  *   partner is notified; the partner sends a new request to retry. Not once
  *   a part was paid (the money left the bank: pay the rest);
- * - cancel (partner, before the branch starts) and reassign (Admin, before
+ * - reassign (Admin, before
  *   the branch pays any of it; the hold moves to the new branch).
  */
 class ProcessPayout
@@ -81,8 +80,8 @@ class ProcessPayout
     {
         $utr = Transaction::normaliseUtr($bankUtr);
 
-        if (preg_match(SubmitPayinProof::UTR_PATTERN, $utr) !== 1) {
-            throw ValidationException::withMessages(['bank_utr' => __('Enter the UTR of your transfer (6–22 letters or digits).')]);
+        if (! Utr::valid($utr)) {
+            throw ValidationException::withMessages(['bank_utr' => __(Utr::MESSAGE)]);
         }
 
         if ($paidAt->isFuture()) {
@@ -241,31 +240,6 @@ class ProcessPayout
             $this->webhooks->forPayout($locked, 'payout.failed');
 
             return $this->sync($payout, $locked);
-        });
-    }
-
-    /**
-     * The partner cancels a payout no branch has started paying.
-     *
-     * @return bool false when it had already moved on
-     */
-    public function cancel(Transaction $payout, string $actorType, ?string $actorId = null): bool
-    {
-        return DB::transaction(function () use ($payout, $actorType, $actorId) {
-            /** @var Transaction $locked */
-            $locked = Transaction::query()->whereKey($payout->id)->lockForUpdate()->firstOrFail();
-
-            if ($locked->status !== PayoutStatus::Assigned->value) {
-                return false;
-            }
-
-            $this->releaseHold($locked, 'cancelled');
-            $locked->forceFill(['status' => PayoutStatus::Cancelled->value, 'status_reason_code' => 'cancelled', 'decided_at' => now()])->save();
-            TransactionEvent::record($locked, 'cancelled', PayoutStatus::Assigned->value, $locked->status, $actorType, $actorId);
-
-            $this->sync($payout, $locked);
-
-            return true;
         });
     }
 

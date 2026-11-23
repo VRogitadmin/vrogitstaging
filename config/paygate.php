@@ -2,6 +2,18 @@
 
 return [
 
+    // Which server this is for partners: "live" (real money), "sandbox"
+    // (staging, for partners to integrate) or "testbox" (our own testing).
+    // Sent in every API answer and webhook; keys are pk_live_ (live),
+    // pk_sb_ (sandbox) or pk_test_ (testbox). Unset: a production install is live, any other
+    // testbox, so set it on every server. See App\Support\ApiEnvironment.
+    'environment' => env('PAYGATE_ENVIRONMENT'),
+
+    // Hosts of our other servers, comma separated (e.g. on live
+    // "a27pay.tech"): partner URLs on them are flagged by the
+    // go-live check (test partner sites).
+    'other_hosts' => env('PAYGATE_OTHER_HOSTS', ''),
+
     'auth' => [
         // Require Admin and Branch users to set up 2FA before using their portal.
         // Keep this on everywhere except, optionally, your own local machine.
@@ -21,6 +33,20 @@ return [
 
         // Requests per minute per partner.
         'rate_limit' => (int) env('PAYGATE_API_RATE_LIMIT', 300),
+
+        // Refuse a key of another server (e.g. a pk_sb_ key on live) with
+        // error `wrong_environment`, so a partner URL left on the wrong
+        // server fails at once. Check first
+        // with `php artisan paygate:key-environments`.
+        'enforce_key_environment' => (bool) env('PAYGATE_API_ENFORCE_KEY_ENVIRONMENT', true),
+
+        // Optional: each server's API base URL, named in that error (e.g.
+        // "send sandbox-key requests to https://…/api/v1").
+        'urls' => [
+            'live' => env('PAYGATE_LIVE_API_URL'),
+            'sandbox' => env('PAYGATE_SANDBOX_API_URL'),
+            'testbox' => env('PAYGATE_TESTBOX_API_URL'),
+        ],
     ],
 
     'webhooks' => [
@@ -37,6 +63,13 @@ return [
         // customer and amount while the first is still unpaid and younger than
         // this is refused (409 duplicate_request) with the first one's link.
         'duplicate_window_seconds' => (int) env('PAYGATE_PAYIN_DUPLICATE_WINDOW', 120),
+    ],
+
+    'security_scan' => [
+        // Admin › Testing › Security Report: the light load per page of each
+        // scan (requests, how many at a time). Keep it light on production.
+        'load_requests' => (int) env('PAYGATE_SCAN_LOAD_REQUESTS', 100),
+        'load_concurrency' => (int) env('PAYGATE_SCAN_LOAD_CONCURRENCY', 10),
     ],
 
     'qa' => [

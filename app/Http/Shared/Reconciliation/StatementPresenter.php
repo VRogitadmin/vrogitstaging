@@ -125,7 +125,7 @@ class StatementPresenter
     {
         $txn = $case->transaction;
 
-        if (! $case->isOpen() || $case->type !== CaseType::WrongBranch || $txn === null || ! $txn->isPayin()
+        if (! $case->isOpen() || ! in_array($case->type, [CaseType::WrongBranch, CaseType::WrongAccount], true) || $txn === null || ! $txn->isPayin()
             || ! in_array($txn->status, ['payment_submitted', 'payment_detected', 'under_review'], true)
             || ! $viewer->isType(UserType::Admin) || ! $viewer->can('reconciliation.resolve') || ! $viewer->can('payins.approve')) {
             return null;
@@ -169,7 +169,9 @@ class StatementPresenter
     /**
      * Transactions a person could link a case's bank line to: same account
      * (deposits) or branch (payouts), exact amount, around the line's date,
-     * not linked elsewhere. `$reference` finds one by our id instead.
+     * not linked elsewhere. A payout counts while one of its transfers has
+     * no bank line; its amount is that transfer's. `$reference` finds one by
+     * our id, order id or UTR instead.
      *
      * @return list<array<string, mixed>>
      */
@@ -185,23 +187,49 @@ class StatementPresenter
         $from = CarbonImmutable::parse($entry->value_date->toDateString(), config('app.business_timezone'))->subDays(10)->utc();
         $to = CarbonImmutable::parse($entry->value_date->toDateString(), config('app.business_timezone'))->addDays(4)->utc();
 
+        $finding = $reference !== null && trim($reference) !== '';
+
+        // A payout paid in parts has one bank line per transfer, so a payout
+        // is linkable while one of its transfers has no line yet: match on
+        // that transfer's amount, not the payout's total.
+        $freePart = fn ($query) => $query->whereDoesntHave('statementEntry');
+        $freePartOfAmount = fn ($query) => $freePart($query)->where('amount', $entry->amount);
+
         $query = TransactionController::scoped($viewer)
             ->with(['partner', 'branch', 'customer'])
             ->where('direction', $credit ? 'payin' : 'payout')
             ->where($credit ? 'payment_account_id' : 'branch_id', $credit ? $entry->payment_account_id : $entry->branch_id)
-            ->whereDoesntHave('statementEntry');
+            ->when($credit, fn ($query) => $query->whereDoesntHave('statementEntry'))
+            ->when(! $credit, fn ($query) => $query
+                ->whereHas('payoutPayments', $freePart)
+                ->withExists(['payoutPayments as free_part_of_amount' => $freePartOfAmount]));
 
-        $query = $reference !== null && trim($reference) !== ''
-            ? $query->where(fn ($query) => TransactionController::search($query, trim($reference)))
-            : $query->where(fn ($query) => $query->where('amount', $entry->amount)->when($case->transaction_id !== null, fn ($query) => $query->orWhere('transactions.id', $case->transaction_id)))
-                ->whereIn('status', $credit ? ['payment_submitted', 'payment_detected', 'under_review', 'success', 'rejected', 'expired'] : ['success'])
+        if ($finding) {
+            $query->where(fn ($query) => TransactionController::search($query, trim($reference)));
+        } elseif ($credit && $entry->utr_normalized !== null) {
+            // A line with a UTR belongs only to the deposit with that UTR
+            // (client report 2026-11-17: other deposits of the same amount
+            // were offered); the amount is shown, and must match to link.
+            $utr = $entry->utr_normalized;
+            $query->where(fn ($query) => $query->where('customer_utr_normalized', $utr)->orWhere('bank_utr_normalized', $utr)
+                ->when($case->transaction_id !== null, fn ($query) => $query->orWhere('transactions.id', $case->transaction_id)))
+                ->whereIn('status', ['payment_submitted', 'payment_detected', 'under_review', 'success', 'rejected', 'expired']);
+        } elseif ($credit) {
+            // No UTR on the line (e.g. a cash deposit): same amount, around its date.
+            $query->where(fn ($query) => $query->where('amount', $entry->amount)->when($case->transaction_id !== null, fn ($query) => $query->orWhere('transactions.id', $case->transaction_id)))
+                ->whereIn('status', ['payment_submitted', 'payment_detected', 'under_review', 'success', 'rejected', 'expired'])
                 ->whereBetween('created_at', [$from, $to]);
+        } else {
+            $query->where(fn ($query) => $query
+                ->whereHas('payoutPayments', fn ($parts) => $freePartOfAmount($parts)->whereBetween('paid_at', [$from, $to]))
+                ->when($case->transaction_id !== null, fn ($query) => $query->orWhere('transactions.id', $case->transaction_id)));
+        }
 
         return array_values($query->orderByDesc('created_at')->limit(20)->get()
             ->map(fn (Transaction $txn) => [
                 ...$this->transaction($txn, $viewer),
-                'late' => in_array($txn->status, ['rejected', 'expired'], true),
-                'same_amount' => $txn->amount === $entry->amount,
+                'late' => $credit && in_array($txn->status, ['rejected', 'expired'], true),
+                'same_amount' => $credit ? $txn->amount === $entry->amount : (bool) $txn->getAttribute('free_part_of_amount'),
             ])->all());
     }
 
@@ -236,6 +264,9 @@ class StatementPresenter
             'status' => $txn->status,
             'partner' => $txn->partner->name,
             'branch' => $txn->branch?->name,
+            // The account the money was meant for: a line typed under another
+            // account of the branch can be moved there (branch "Match").
+            'account_id' => $txn->payment_account_id,
             'customer_utr' => $txn->customer_utr_normalized,
             'bank_utr' => $txn->bank_utr_normalized,
             'decided_by' => $txn->decider?->name,

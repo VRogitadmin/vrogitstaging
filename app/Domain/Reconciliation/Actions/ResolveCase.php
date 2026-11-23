@@ -14,8 +14,8 @@ use App\Domain\Reconciliation\Models\StatementEntry;
 use App\Domain\Reconciliation\StatementMatcher;
 use App\Domain\Transaction\Actions\DecidePayin;
 use App\Domain\Transaction\Actions\MovePayin;
-use App\Domain\Transaction\Actions\SubmitPayinProof;
 use App\Domain\Transaction\Models\Transaction;
+use App\Domain\Transaction\Utr;
 use Illuminate\Auth\Access\AuthorizationException;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
@@ -64,6 +64,18 @@ class ResolveCase
             $this->ensureSameMoney($entry, $txn);
             $part = $txn->isPayin() ? null : $this->transferFor($entry, $txn);
 
+            // One UTR is one transfer: a line with a UTR links only to the
+            // deposit with that UTR.
+            $utr = $entry->utr_normalized;
+
+            if ($txn->isPayin() && $utr !== null && $txn->customer_utr_normalized !== $utr && $txn->bank_utr_normalized !== $utr) {
+                throw ValidationException::withMessages(['transaction' => __(':reference has UTR :theirs, but this bank line shows :utr. Only the deposit with the same UTR can be linked.', [
+                    'reference' => $txn->reference,
+                    'theirs' => $txn->bank_utr_normalized ?? $txn->customer_utr_normalized ?? __('none'),
+                    'utr' => $utr,
+                ])]);
+            }
+
             if ($txn->isPayin() && ! in_array($txn->status, self::LINKABLE_PAYIN, true)) {
                 throw ValidationException::withMessages(['transaction' => in_array($txn->status, ['rejected', 'expired'], true)
                     ? __(':reference is :status: an administrator can approve it late.', ['reference' => $txn->reference, 'status' => $txn->status])
@@ -80,8 +92,8 @@ class ResolveCase
             $entry = $this->lockOpen($case);
             $payin = $case->transaction_id === null ? null : Transaction::query()->find($case->transaction_id);
 
-            if ($case->type !== CaseType::WrongBranch || $payin === null || ! $payin->isPayin() || ! $entry->isCredit()) {
-                throw ValidationException::withMessages(['case' => __('Only a “wrong branch” case about a deposit can move it here.')]);
+            if (! in_array($case->type, [CaseType::WrongBranch, CaseType::WrongAccount], true) || $payin === null || ! $payin->isPayin() || ! $entry->isCredit()) {
+                throw ValidationException::withMessages(['case' => __('Only a “wrong branch” or “wrong bank account” case about a deposit can move it here.')]);
             }
 
             $moved = $this->move->handle($actor, $payin, $entry->paymentAccount, $note);
@@ -90,7 +102,7 @@ class ResolveCase
             // link it now if the amount does.
             $entry->refresh();
 
-            if ($entry->transaction_id === null && $entry->openCase()->first()?->type === CaseType::WrongBranch && $entry->amount === $moved->amount) {
+            if ($entry->transaction_id === null && in_array($entry->openCase()->first()?->type, [CaseType::WrongBranch, CaseType::WrongAccount], true) && $entry->amount === $moved->amount) {
                 $this->matcher->link($entry, $moved, $actor, $note);
             }
 
@@ -108,7 +120,8 @@ class ResolveCase
             $entry = $this->lockOpen($case);
             $payin = $this->lockTransaction($payin);
 
-            $this->ensureSameMoney($entry, $payin, exactAmount: false);
+            // Only the order amount is approved (client request 2026-11-17).
+            $this->ensureSameMoney($entry, $payin);
 
             $utr = trim((string) $bankUtr) !== '' ? (string) $bankUtr : $entry->utr_normalized;
 
@@ -116,7 +129,7 @@ class ResolveCase
                 throw ValidationException::withMessages(['bank_utr' => __('Enter the bank UTR of this credit.')]);
             }
 
-            $approved = $this->decide->approveLate($actor, $payin, $utr, $note ?? __('Late payment, approved from case :case.', ['case' => $case->reference]), $entry->amount);
+            $approved = $this->decide->approveLate($actor, $payin, $utr, $note ?? __('Late payment, approved from case :case.', ['case' => $case->reference]));
 
             // Approval links a line with the same UTR itself; otherwise link this one.
             if ($entry->refresh()->transaction_id === null) {
@@ -187,8 +200,8 @@ class ResolveCase
             $entry = $this->lockOpen($case);
             $normalised = $utr === null || trim($utr) === '' ? null : Transaction::normaliseUtr($utr);
 
-            if ($normalised !== null && preg_match(SubmitPayinProof::UTR_PATTERN, $normalised) !== 1) {
-                throw ValidationException::withMessages(['utr' => __('Enter the UTR / reference number only (6–22 letters or digits).')]);
+            if ($normalised !== null && ! Utr::valid($normalised)) {
+                throw ValidationException::withMessages(['utr' => __(Utr::MESSAGE)]);
             }
 
             if ($normalised === null && trim((string) $entry->description) === '') {
@@ -248,6 +261,12 @@ class ResolveCase
 
     public function close(User $actor, ReconciliationCase $case, Resolution $resolution, string $note): void
     {
+        // Client request 2026-11-17: only Admin closes a line (bank charges,
+        // a line typed twice, money returned outside PayGate).
+        if (! $actor->isType(UserType::Admin)) {
+            throw ValidationException::withMessages(['resolution' => __('Only an administrator can close a case.')]);
+        }
+
         if (! in_array($resolution, [Resolution::Rejected, Resolution::Refunded], true)) {
             throw ValidationException::withMessages(['resolution' => __('Choose how to close this case.')]);
         }
@@ -343,8 +362,8 @@ class ResolveCase
             $txn->isPayin() && $txn->payment_account_id !== $entry->payment_account_id => __(':reference was paid to another account.', ['reference' => $txn->reference]),
             ! $txn->isPayin() && $txn->branch_id !== $entry->branch_id => __(':reference was paid by another branch.', ['reference' => $txn->reference]),
             $exactAmount && $txn->isPayin() && $txn->amount !== $entry->amount => __(in_array($txn->status, ['payment_submitted', 'payment_detected', 'under_review'], true)
-                ? 'The amounts differ (bank ₹:bank, :reference ₹:txn). Approve :reference in Deposits for the amount received; this line then links itself.'
-                : 'The amounts differ (bank ₹:bank, :reference ₹:txn). Only exact amounts can be linked.', [
+                ? 'The amounts differ (bank ₹:bank, :reference ₹:txn). A different amount can’t be approved: decline :reference from the statement line (this line then waits for a deposit of the amount the bank shows). If the bank line was typed wrong, Admin corrects it.'
+                : 'The amounts differ (bank ₹:bank, :reference ₹:txn). A different amount can’t be approved. If the bank line was typed wrong, Admin corrects it.', [
                     'bank' => number_format($entry->amount / 100, 2),
                     'reference' => $txn->reference,
                     'txn' => number_format($txn->amount / 100, 2),

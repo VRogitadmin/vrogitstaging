@@ -22,6 +22,7 @@ import {
     DISPLAY_LABELS,
     LineAmount,
     MATCH_LABELS,
+    MoveLineDialog,
 } from '@/components/pg/reconciliation';
 import type {
     CaseSummary,
@@ -47,6 +48,7 @@ import branchDeposits from '@/routes/branch/deposits';
 import branchImports from '@/routes/branch/statement-imports';
 import branchStatements from '@/routes/branch/statements';
 import type { UserType } from '@/types';
+import { cleanUtr } from '@/lib/utr';
 
 type Filters = {
     from: string;
@@ -117,6 +119,13 @@ type Props = {
     detail?: Detail | null;
 };
 
+/** What became of the deposit an unsettled line points at. */
+const DEPOSIT_OUTCOME: Record<string, string> = {
+    rejected: 'Deposit declined',
+    expired: 'Deposit expired',
+    cancelled: 'Deposit cancelled',
+};
+
 /** Deposit statuses that can still be declined. */
 const WAITING = ['payment_submitted', 'payment_detected', 'under_review'];
 
@@ -129,7 +138,7 @@ const TABS: [string, string][] = [
 ];
 
 type Decision = null | {
-    kind: 'approve' | 'hold' | 'decline' | 'edit';
+    kind: 'approve' | 'hold' | 'decline' | 'edit' | 'move';
     line: StatementLine;
 };
 
@@ -243,6 +252,88 @@ export default function Statements(props: Props) {
         line.case.type === 'amount_mismatch' &&
         !!line.transaction?.can_decide &&
         WAITING.includes(line.transaction.status);
+
+    // Branch only (client request 2026-11-17): the branch's other accounts a
+    // typed line can be moved to, when the deposit it points at is on one of
+    // them, i.e. the bank doesn't match. "Match" then only changes the account.
+    const moveTargets = (line: StatementLine) => {
+        const own = accounts.find((account) => account.id === line.account.id);
+        const target = line.transaction?.account_id;
+
+        if (
+            portal !== 'branch' ||
+            !props.can.resolve ||
+            line.case?.status !== 'open' ||
+            line.case.type !== 'wrong_account' ||
+            line.source !== 'manual' ||
+            line.linked ||
+            !own ||
+            !target ||
+            target === line.account.id ||
+            !accounts.some(
+                (account) =>
+                    account.id === target &&
+                    account.branch_id === own.branch_id,
+            )
+        ) {
+            return [];
+        }
+
+        return accounts
+            .filter(
+                (account) =>
+                    account.branch_id === own.branch_id &&
+                    account.id !== line.account.id,
+            )
+            .map((account) => ({
+                id: account.id,
+                name: accountLabel(account),
+            }));
+    };
+
+    // Branch: the only actions on an open line are Decline (amount mismatch:
+    // only the order amount is ever approved, client request 2026-11-17) or
+    // Match (bank account mismatch); anything else is Details.
+    const branchActions = (line: StatementLine, size: 'row' | 'drawer') => {
+        const cls =
+            size === 'row' ? 'h-7 px-2 text-xs' : 'h-8 px-3 text-[13px]';
+
+        if (canDecline(line)) {
+            return (
+                <PgButton
+                    className={`${cls} text-er`}
+                    onClick={() => setDecision({ kind: 'decline', line })}
+                >
+                    Decline
+                </PgButton>
+            );
+        }
+
+        if (moveTargets(line).length > 0) {
+            return (
+                <PgButton
+                    className={`${cls} text-ac`}
+                    onClick={() => setDecision({ kind: 'move', line })}
+                >
+                    Match
+                </PgButton>
+            );
+        }
+
+        // Another branch's deposit: the branch can't fix it, Admin moves it.
+        if (line.case?.type === 'wrong_branch') {
+            return (
+                <span
+                    className={`inline-flex items-center rounded-md bg-sf2 px-2 text-xs text-tx3 ${size === 'row' ? 'h-7' : 'h-8'}`}
+                    title={line.case.notes ?? undefined}
+                >
+                    Admin will move it
+                </span>
+            );
+        }
+
+        return null;
+    };
 
     const columns: Column<StatementLine>[] = [
         {
@@ -373,6 +464,14 @@ export default function Statements(props: Props) {
                             )}
                         </Tooltip>
                     )}
+                    {!line.linked &&
+                        line.transaction &&
+                        DEPOSIT_OUTCOME[line.transaction.status] && (
+                            <StatusBadge
+                                status={line.transaction.status}
+                                label={DEPOSIT_OUTCOME[line.transaction.status]}
+                            />
+                        )}
                     {decisionButtons(line)}
                 </div>
             ),
@@ -440,7 +539,30 @@ export default function Statements(props: Props) {
                     className="flex gap-1.5"
                     onClick={(event) => event.stopPropagation()}
                 >
-                    {line.case?.status === 'open' ? (
+                    {portal === 'branch' && line.case?.status === 'open' ? (
+                        (() => {
+                            const actions = branchActions(line, 'row');
+                            const details = (
+                                <PgButton
+                                    className="h-7 px-2 text-xs"
+                                    onClick={() => openLine(line.id)}
+                                >
+                                    Details
+                                </PgButton>
+                            );
+
+                            // "Admin will move it" is a note, not an action.
+                            return line.case.type === 'wrong_branch' ? (
+                                <>
+                                    {actions}
+                                    {details}
+                                </>
+                            ) : (
+                                (actions ?? details)
+                            );
+                        })()
+                    ) : line.case?.status === 'open' &&
+                      line.case.type !== 'amount_mismatch' ? (
                         <Link
                             href={
                                 cases.index({ query: { case: line.case.id } })
@@ -466,7 +588,7 @@ export default function Statements(props: Props) {
                             Edit
                         </PgButton>
                     )}
-                    {canDecline(line) && (
+                    {portal !== 'branch' && canDecline(line) && (
                         <PgButton
                             className="h-7 px-2 text-xs text-er"
                             onClick={() =>
@@ -598,7 +720,7 @@ export default function Statements(props: Props) {
                         <option value="">Branch match: all</option>
                         <option value="matched">Matched</option>
                         <option value="mismatch">Mismatch</option>
-                        <option value="none">Not matched</option>
+                        <option value="none">No deposit yet</option>
                     </SelectInput>
                     <label className="flex h-[30px] w-[240px] items-center gap-2 rounded-[7px] border border-ln px-2.5 text-tx3 focus-within:border-ac">
                         <Search className="size-3.5" />
@@ -674,29 +796,37 @@ export default function Statements(props: Props) {
                     }
                     actions={
                         <>
-                            {open.case?.status === 'open' && (
-                                <Link
-                                    href={
-                                        cases.index({
-                                            query: { case: open.case.id },
-                                        }).url
-                                    }
-                                    className="inline-flex h-8 items-center rounded-[7px] bg-brand px-3 text-[13px] font-medium text-white"
-                                >
-                                    Match to transaction
-                                </Link>
-                            )}
+                            {portal === 'branch' &&
+                                open.case?.status === 'open' &&
+                                branchActions(open, 'drawer')}
+                            {portal !== 'branch' &&
+                                open.case?.status === 'open' &&
+                                open.case.type !== 'amount_mismatch' && (
+                                    <Link
+                                        href={
+                                            cases.index({
+                                                query: { case: open.case.id },
+                                            }).url
+                                        }
+                                        className="inline-flex h-8 items-center rounded-[7px] bg-brand px-3 text-[13px] font-medium text-white"
+                                    >
+                                        Match to transaction
+                                    </Link>
+                                )}
                             {canEdit(open) && (
                                 <PgButton
                                     className="h-8 px-3 text-[13px]"
                                     onClick={() =>
-                                        setDecision({ kind: 'edit', line: open })
+                                        setDecision({
+                                            kind: 'edit',
+                                            line: open,
+                                        })
                                     }
                                 >
                                     Edit UTR / amount
                                 </PgButton>
                             )}
-                            {canDecline(open) && (
+                            {portal !== 'branch' && canDecline(open) && (
                                 <PgButton
                                     className="h-8 px-3 text-[13px] text-er"
                                     onClick={() =>
@@ -770,6 +900,19 @@ export default function Statements(props: Props) {
                     }
                 />
             )}
+            {decision?.kind === 'move' && decision.line.case && (
+                <MoveLineDialog
+                    url={cases.moveLine(decision.line.case.id).url}
+                    from={accountLabel({
+                        ...decision.line.account,
+                        branch: decision.line.branch.name,
+                    })}
+                    accounts={moveTargets(decision.line)}
+                    preselect={decision.line.transaction?.account_id}
+                    onClose={() => setDecision(null)}
+                    onDone={() => setOpenId(null)}
+                />
+            )}
             {decision?.kind === 'hold' && decision.line.transaction && (
                 <ConfirmDialog
                     open
@@ -832,9 +975,12 @@ function EditLine({
         >
             <Field label="UTR / reference" error={errors.utr ?? errors.case}>
                 <TextInput
+                    autoCapitalize="characters"
                     className="font-mono"
                     value={form.data.utr}
-                    onChange={(event) => form.setData('utr', event.target.value)}
+                    onChange={(event) =>
+                        form.setData('utr', cleanUtr(event.target.value))
+                    }
                 />
             </Field>
             <Field
@@ -854,7 +1000,9 @@ function EditLine({
                 <TextInput
                     required
                     value={form.data.note}
-                    onChange={(event) => form.setData('note', event.target.value)}
+                    onChange={(event) =>
+                        form.setData('note', event.target.value)
+                    }
                 />
             </Field>
         </FormDialog>
@@ -872,6 +1020,7 @@ function ApproveFromLine({
     onClose: () => void;
 }) {
     const txn = line.transaction!;
+    // Only the order amount is ever approved (client request 2026-11-17).
     const form = useForm({ bank_utr: line.utr ?? '', note: '' });
     const errors = form.errors as Record<string, string | undefined>;
 
@@ -892,15 +1041,24 @@ function ApproveFromLine({
                 error={errors.bank_utr ?? errors.status}
             >
                 <TextInput
+                    autoCapitalize="characters"
                     required
                     className="font-mono"
                     value={form.data.bank_utr}
                     onChange={(event) =>
-                        form.setData('bank_utr', event.target.value)
+                        form.setData('bank_utr', cleanUtr(event.target.value))
                     }
                 />
             </Field>
-            <Field label="Note (optional)">
+            <Field label="Amount (₹)" error={errors.received_amount}>
+                <TextInput
+                    readOnly
+                    tabIndex={-1}
+                    className="cursor-not-allowed bg-sf2 font-mono text-tx2"
+                    value={(txn.amount / 100).toFixed(2)}
+                />
+            </Field>
+            <Field label="Note (optional)" error={errors.note}>
                 <TextInput
                     value={form.data.note}
                     onChange={(event) =>

@@ -9,6 +9,7 @@ use App\Domain\Network\Models\PartnerBranchMapping;
 use App\Domain\Notification\Enums\Alert;
 use App\Domain\Notification\Notifications\PortalAlert;
 use App\Domain\PaymentAccount\Models\PaymentAccount;
+use App\Domain\Platform\Settings;
 use App\Domain\Reconciliation\Models\ReconciliationCase;
 use App\Domain\Reconciliation\Models\StatementEntry;
 use App\Domain\Transaction\Models\Transaction;
@@ -17,6 +18,7 @@ use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Notification;
 use Illuminate\Support\Facades\Queue;
+use Inertia\Testing\AssertableInertia as Assert;
 use Tests\Concerns\BuildsPayinNetwork;
 use Tests\TestCase;
 
@@ -150,7 +152,8 @@ class AutoApproveDepositTest extends TestCase
         $this->assertSame('success', $payin->status);
         $this->assertSame($this->paidBranch->id, $payin->branch_id);
         $this->assertSame($this->paidAccount->id, $payin->payment_account_id);
-        $this->assertTrue(TransactionEvent::where(['transaction_id' => $payin->id, 'event' => 'moved'])->exists());
+        // Recorded as automatic, not as the person's own move.
+        $this->assertTrue(TransactionEvent::where(['transaction_id' => $payin->id, 'event' => 'moved'])->sole()->data['auto'] ?? false);
         $this->assertSame('resolved', ReconciliationCase::sole()->status);
         // Admin and the first branch are told; the paid branch gets no "check and approve" alert.
         $this->assertSame(1, $this->alerted($this->admin, Alert::DepositAutoMoved));
@@ -174,6 +177,62 @@ class AutoApproveDepositTest extends TestCase
         $payin = Transaction::where('reference', $reference)->sole();
         $this->assertSame('success', $payin->status);
         $this->assertSame($this->paidBranch->id, $payin->branch_id);
+    }
+
+    /**
+     * Client scenario 2026-11-17: ABC paid ₹500 into the paid branch's
+     * account on request 1 without entering the UTR, then typed that UTR on a
+     * new ₹1,000 request given to the first branch. The paid branch's line
+     * (₹500) moves the request there, but doesn't approve the other amount.
+     */
+    public function test_a_different_amount_at_another_branch_moves_the_deposit_for_the_branch_to_decide()
+    {
+        $this->givenPaidAccountEarlier();
+        $payin = $this->depositAtFirstBranch(amount: 1000000);
+
+        $this->addLine($this->paidOperator, $this->paidAccount, credit: '5000')->assertSessionHasNoErrors();
+
+        $payin->refresh();
+        $this->assertSame('payment_submitted', $payin->status);
+        $this->assertSame($this->paidBranch->id, $payin->branch_id);
+        $this->assertSame($this->paidAccount->id, $payin->payment_account_id);
+        $case = ReconciliationCase::sole();
+        $this->assertSame('open', $case->status);
+        $this->assertSame('amount_mismatch', $case->type->value);
+        $this->assertSame($payin->id, $case->transaction_id);
+        // The paid branch is asked to check it; Admin and the first branch are told it moved.
+        $this->assertSame(1, $this->alerted($this->paidOperator, Alert::DepositMoved));
+        $this->assertSame(1, $this->alerted($this->admin, Alert::DepositAutoMoved));
+        $this->assertSame(1, $this->alerted($this->operator, Alert::DepositAutoMoved));
+
+        // A different amount is never approved: the paid branch declines it.
+        $this->actingAs($this->paidOperator)->post(route('branch.deposits.approve', $payin), [
+            'bank_utr' => self::UTR,
+            'received_amount' => '5000',
+            'note' => 'Customer paid ₹5,000 of ₹10,000',
+        ])->assertSessionHasErrors('received_amount');
+        $this->actingAs($this->paidOperator)->post(route('branch.deposits.decline', $payin), ['reason_code' => 'wrong_amount'])->assertSessionHasNoErrors();
+
+        $this->assertSame('rejected', $payin->refresh()->status);
+        $this->assertSame('open', $case->refresh()->status);
+    }
+
+    public function test_the_customers_utr_after_a_line_of_another_amount_also_moves_the_deposit()
+    {
+        $this->givenPaidAccountEarlier();
+        $this->addLine($this->paidOperator, $this->paidAccount, credit: '5000')->assertSessionHasNoErrors();
+
+        // A ₹1,000 request allocated to the first branch; the UTR is entered afterwards.
+        $this->paidAccount->update(['status' => 'inactive']);
+        [$reference, $token] = $this->createPayin(['amount' => 1000000, 'customer' => self::CUSTOMER]);
+        $this->post("http://pay.a27pay.local/p/{$token}/method", ['method' => 'upi']);
+        $this->paidAccount->update(['status' => 'active']);
+        $this->postProof($token, self::UTR)->assertSessionHasNoErrors();
+
+        $payin = Transaction::where('reference', $reference)->sole();
+        $this->assertSame('payment_submitted', $payin->status);
+        $this->assertSame($this->paidBranch->id, $payin->branch_id);
+        $this->assertSame('amount_mismatch', ReconciliationCase::sole()->type->value);
     }
 
     public function test_a_deposit_the_branch_reported_not_in_its_bank_is_moved_and_approved()
@@ -248,6 +307,69 @@ class AutoApproveDepositTest extends TestCase
         $this->assertSame('wrong_branch', ReconciliationCase::sole()->type->value);
     }
 
+    public function test_a_different_amount_moves_to_the_branch_with_the_money_even_if_never_given_its_account()
+    {
+        // Client request 2026-11-19: ₹500 reached the paid branch with this
+        // UTR; the ₹1,000 deposit claiming it sits at the first branch.
+        $payin = $this->depositAtFirstBranch(amount: 1000000);
+
+        $this->addLine($this->paidOperator, $this->paidAccount, credit: '5000')->assertSessionHasNoErrors();
+
+        $payin->refresh();
+        $this->assertSame('payment_submitted', $payin->status);
+        $this->assertSame($this->paidBranch->id, $payin->branch_id);
+        $case = ReconciliationCase::sole();
+        $this->assertSame('amount_mismatch', $case->type->value);
+        $this->assertSame($this->paidBranch->id, $case->branch_id);
+        $this->assertSame(1, $this->alerted($this->operator, Alert::DepositAutoMoved));
+
+        // Never approved by itself; the paid branch declines it.
+        $this->actingAs($this->paidOperator)->post(route('branch.deposits.decline', $payin), ['reason_code' => 'wrong_amount'])->assertSessionHasNoErrors();
+        $this->assertSame('rejected', $payin->refresh()->status);
+    }
+
+    public function test_the_recheck_command_moves_a_different_amount_left_as_wrong_branch()
+    {
+        // As left behind before the change: the line waits as Wrong branch.
+        $this->manualApproval();
+        $payin = $this->depositAtFirstBranch(amount: 1000000);
+        $this->addLine($this->paidOperator, $this->paidAccount, credit: '5000')->assertSessionHasNoErrors();
+        $this->assertSame('wrong_branch', ReconciliationCase::sole()->type->value);
+        $this->assertSame($this->branch->id, $payin->refresh()->branch_id);
+        app(Settings::class)->set(Settings::AUTO_APPROVE_DEPOSITS, true, $this->admin);
+
+        $this->artisan('reconciliation:recheck')->expectsOutputToContain('1 “Wrong branch” deposit(s) moved')->assertSuccessful();
+
+        $this->assertSame($this->paidBranch->id, $payin->refresh()->branch_id);
+        $this->assertSame('amount_mismatch', ReconciliationCase::sole()->type->value);
+        $this->artisan('reconciliation:recheck')->expectsOutputToContain('0 “Wrong branch”')->assertSuccessful();
+    }
+
+    public function test_the_customers_utr_on_a_line_of_another_amount_on_the_same_account_is_accepted_and_explained()
+    {
+        // Client report 2026-11-19: the branch entered ₹500 first; the
+        // customer then submitted that UTR on a ₹1,000 deposit given the same
+        // account, and was refused with "The deposit is already on this account".
+        $this->addLine($this->paidOperator, $this->paidAccount, credit: '500')->assertSessionHasNoErrors();
+        $this->account->update(['status' => 'inactive']);
+        [$reference, $token] = $this->createPayin(['amount' => 100000, 'customer' => self::CUSTOMER]);
+        $this->post("http://pay.a27pay.local/p/{$token}/method", ['method' => 'upi']);
+        $this->account->update(['status' => 'active']);
+
+        $this->postProof($token, self::UTR)->assertSessionHasNoErrors();
+
+        $payin = Transaction::where('reference', $reference)->sole();
+        $this->assertSame('payment_submitted', $payin->status);
+        $this->assertSame($this->paidAccount->id, $payin->payment_account_id);
+        $case = ReconciliationCase::sole();
+        $this->assertSame('amount_mismatch', $case->type->value);
+        $this->assertSame($payin->id, $case->transaction_id);
+
+        // The customer is told the amount doesn't match (without the bank's amount).
+        $this->get("http://pay.a27pay.local/p/{$token}")
+            ->assertInertia(fn (Assert $page) => $page->where('payin.amount_mismatch', true));
+    }
+
     public function test_another_branchs_utr_typed_on_a_bank_line_is_refused_and_admin_alerted()
     {
         $this->addLine($this->operator, $this->account)->assertSessionHasNoErrors();
@@ -274,6 +396,18 @@ class AutoApproveDepositTest extends TestCase
         $this->assertSame('success', $real->refresh()->status);
         $event = TransactionEvent::where(['transaction_id' => $real->id, 'event' => 'proof_submitted'])->sole();
         $this->assertSame($fake->reference, $event->data['possible_duplicate_of']);
+    }
+
+    public function test_a_switched_off_account_takes_no_new_line_and_is_not_offered()
+    {
+        // Client request 2026-11-23: an inactive account isn't in Manual Entry.
+        $this->paidAccount->update(['status' => 'inactive']);
+
+        $this->addLine($this->paidOperator, $this->paidAccount)->assertSessionHasErrors('payment_account_id');
+        $this->assertSame(0, StatementEntry::count());
+
+        $this->actingAs($this->paidOperator)->get(route('branch.statements.index'))
+            ->assertInertia(fn (Assert $page) => $page->where('hub.entry.accounts', []));
     }
 
     public function test_a_utr_of_an_approved_deposit_is_refused_to_anyone_else()

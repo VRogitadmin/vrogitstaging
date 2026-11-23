@@ -120,3 +120,45 @@ export function PeriodFilter({
         </div>
     );
 }
+
+/** Open work from before the period (Period::olderOpen). */
+export type OlderOpen = { count: number; from: string; to: string } | null;
+
+/**
+ * "Today" lists only today (client request 2026-11-18); open items from
+ * before the period are counted here, with a button that widens the period
+ * to show them, so nothing waiting is missed.
+ */
+export function OlderOpenBanner({
+    older,
+    noun,
+    onShow,
+}: {
+    older: OlderOpen | undefined;
+    /** e.g. ["deposit", "deposits"] */
+    noun: [string, string];
+    onShow: (query: PeriodQuery) => void;
+}) {
+    if (!older) return null;
+
+    return (
+        <div className="flex flex-wrap items-center gap-2 rounded-lg bg-wnb px-3 py-2 text-[12.5px] text-wn">
+            <span>
+                <b>{older.count}</b>{' '}
+                {older.count === 1
+                    ? `older ${noun[0]} is`
+                    : `older ${noun[1]} are`}{' '}
+                still waiting (from before this period).
+            </span>
+            <button
+                type="button"
+                onClick={() =>
+                    onShow({ range: 'custom', from: older.from, to: older.to })
+                }
+                className="font-medium underline underline-offset-2"
+            >
+                Show {older.count === 1 ? 'it' : 'them'}
+            </button>
+        </div>
+    );
+}

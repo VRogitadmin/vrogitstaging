@@ -1,5 +1,6 @@
 import type { InertiaLinkProps } from '@inertiajs/react';
 import {
+    BookOpen,
     Code,
     FileText,
     GitCompareArrows,
@@ -149,11 +150,6 @@ export const PORTAL_NAV: Record<UserType, NavGroup[]> = {
                 // All withdrawals (opens first), Manual Payout, UTR Reconciliation.
                 { label: 'Withdrawal', hub: 'withdrawal' },
                 {
-                    label: 'Refunds',
-                    href: admin.refunds.index(),
-                    permission: 'reversals.view',
-                },
-                {
                     label: 'Chargebacks',
                     href: admin.chargebacks.index(),
                     permission: 'reversals.view',
@@ -231,6 +227,46 @@ export const PORTAL_NAV: Record<UserType, NavGroup[]> = {
                     href: admin.reports.show({ report: 'partner_withdrawals' }),
                     permission: 'reports.view',
                 },
+                {
+                    label: 'Pay-ins Report',
+                    href: admin.reports.show({ report: 'payins' }),
+                    permission: 'reports.view',
+                },
+                {
+                    label: 'Payouts Report',
+                    href: admin.reports.show({ report: 'payouts' }),
+                    permission: 'reports.view',
+                },
+                {
+                    label: 'Partner-wise Report',
+                    href: admin.reports.show({ report: 'partners' }),
+                    permission: 'reports.view',
+                },
+                {
+                    label: 'Branch-wise Report',
+                    href: admin.reports.show({ report: 'branches' }),
+                    permission: 'reports.view',
+                },
+                {
+                    label: 'Partner ↔ Branch Report',
+                    href: admin.reports.show({ report: 'pairs' }),
+                    permission: 'reports.view',
+                },
+                {
+                    label: 'Commission Report',
+                    href: admin.reports.show({ report: 'commission' }),
+                    permission: 'reports.view',
+                },
+                {
+                    label: 'Balances Report',
+                    href: admin.reports.show({ report: 'balances' }),
+                    permission: 'reports.view',
+                },
+                {
+                    label: 'Settlements Report',
+                    href: admin.reports.show({ report: 'settlements' }),
+                    permission: 'reports.view',
+                },
             ],
         },
         {
@@ -276,6 +312,13 @@ export const PORTAL_NAV: Record<UserType, NavGroup[]> = {
                     permission: 'partners.view',
                 },
             ],
+        },
+        {
+            // Admin only (2026-11-16): the whole system in simple English,
+            // to answer branches' and partners' questions.
+            label: 'Guide',
+            icon: BookOpen,
+            items: [{ label: 'Guide', href: admin.guide() }],
         },
         account,
     ],

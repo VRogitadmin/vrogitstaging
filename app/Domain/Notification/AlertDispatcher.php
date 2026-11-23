@@ -231,16 +231,23 @@ class AlertDispatcher
      * A branch's bank line showed a deposit waiting at another branch: it was
      * moved there and approved automatically. Admin and the old branch see it.
      */
-    public function depositAutoMoved(Transaction $payin, string $fromBranchId): void
+    public function depositAutoMoved(Transaction $payin, string $fromBranchId, bool $approved = true, ?int $bankAmount = null): void
     {
         $from = Branch::query()->whereKey($fromBranchId)->value('name');
         $to = Branch::query()->whereKey($payin->branch_id)->value('name');
         $title = __('Deposit :reference moved :from → :to automatically', ['reference' => $payin->reference, 'from' => $from ?? '—', 'to' => $to ?? '—']);
-        $body = __('Branch :to’s bank shows UTR :utr for ₹:amount, so the deposit was moved there and approved.', [
-            'to' => $to ?? '—',
-            'utr' => $payin->bank_utr_normalized ?? $payin->customer_utr_normalized ?? '—',
-            'amount' => $this->money($payin->amount),
-        ]);
+        $body = $approved
+            ? __('Branch :to’s bank shows UTR :utr for ₹:amount, so the deposit was moved there and approved.', [
+                'to' => $to ?? '—',
+                'utr' => $payin->bank_utr_normalized ?? $payin->customer_utr_normalized ?? '—',
+                'amount' => $this->money($payin->amount),
+            ])
+            : __('Branch :to’s bank shows UTR :utr for ₹:bank, but the deposit is for ₹:amount. It was moved there for the branch to decline (a different amount can’t be approved).', [
+                'to' => $to ?? '—',
+                'utr' => $payin->customer_utr_normalized ?? '—',
+                'bank' => $this->money((int) $bankAmount),
+                'amount' => $this->money($payin->amount),
+            ]);
 
         $this->alerts->send(Alert::DepositAutoMoved, $this->alerts->recipients(Permission::PayinsApprove, UserType::Admin), $title, $body, Alerts::link('admin.transactions.index', ['txn' => $payin->id]));
         $this->alerts->send(Alert::DepositAutoMoved, $this->alerts->recipients(Permission::PayinsApprove, UserType::Branch, $fromBranchId), $title, $body);
@@ -372,7 +379,6 @@ class AlertDispatcher
     {
         $what = match ($reversal->kind) {
             'chargeback' => __('Chargeback on :reference', ['reference' => $txn->reference]),
-            'refund' => __('Deposit :reference refunded', ['reference' => $txn->reference]),
             default => __('Payout :reference returned', ['reference' => $txn->reference]),
         };
         $body = __('₹:amount · :reason', ['amount' => $this->money($reversal->amount), 'reason' => $reversal->reason]);

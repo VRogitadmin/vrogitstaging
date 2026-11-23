@@ -15,8 +15,16 @@ import { ViewTabs } from '@/components/pg/filter-bar';
 import { KpiGrid, StatTile } from '@/components/pg/kpi-card';
 import { LiveIndicator, PageHeader } from '@/components/pg/page-header';
 import { PaymentHubHeader } from '@/components/pg/payment-hub';
-import { PeriodFilter, periodQuery } from '@/components/pg/period-filter';
-import type { PeriodQuery, PeriodValue } from '@/components/pg/period-filter';
+import {
+    OlderOpenBanner,
+    PeriodFilter,
+    periodQuery,
+} from '@/components/pg/period-filter';
+import type {
+    OlderOpen,
+    PeriodQuery,
+    PeriodValue,
+} from '@/components/pg/period-filter';
 import { Segmented } from '@/components/pg/segmented';
 import { StatusBadge } from '@/components/pg/status-badge';
 import {
@@ -59,6 +67,8 @@ type Props = {
     filters: TxnFilterValues & { status: Group | null; search: string };
     /** Null on the Chargebacks / Payout returns pages (every open case). */
     period: PeriodValue | null;
+    /** Open ones created before the period (shown in a banner). */
+    older?: OlderOpen;
     partners: { id: string; code: string; name: string }[];
     branch_options: { id: string; code: string; name: string }[];
     summary: Partial<
@@ -167,7 +177,7 @@ const TABS: Record<'payin' | 'payout', [Group | 'all', string][]> = {
         ['success', 'Success'],
         ['rejected', 'Declined'],
         ['open', 'Not paid yet'],
-        ['closed', 'Expired / cancelled'],
+        ['closed', 'Expired'],
         ['chargeback', 'Chargeback'],
     ],
     payout: [
@@ -176,7 +186,6 @@ const TABS: Record<'payin' | 'payout', [Group | 'all', string][]> = {
         ['hold', 'Being paid'],
         ['success', 'Paid'],
         ['rejected', 'Failed'],
-        ['closed', 'Cancelled'],
         ['return', 'Returns'],
     ],
 };
@@ -207,6 +216,7 @@ export default function Transactions({
     transactions,
     filters,
     period,
+    older = null,
     partners,
     branch_options,
     summary,
@@ -284,12 +294,14 @@ export default function Transactions({
         router.reload({ only: ['detail', 'selected'], data: { txn: id } });
     };
 
-    // A deposit with a chargeback (a payout with a return) is also counted under Success.
+    // A deposit with a chargeback (a payout with a return) is also counted
+    // under Success. Expired deposits are only in their own tab, not in All
+    // (client request 2026-11-19).
     const total = (
         Object.entries(summary) as [Group, { count: number }][]
     ).reduce(
         (sum, [group, figures]) =>
-            group === 'chargeback' || group === 'return'
+            group === 'chargeback' || group === 'return' || group === 'closed'
                 ? sum
                 : sum + figures.count,
         0,
@@ -555,10 +567,19 @@ export default function Transactions({
                     <div className="border-b border-ln2 px-3 py-2.5">
                         <PeriodFilter period={period} onChange={visit} />
                         <p className="mt-1.5 text-[11.5px] text-tx3">
-                            {direction === 'payin'
-                                ? 'The period applies by creation date. Pending, On hold and Not paid yet always show every open deposit, whatever the date.'
-                                : 'The period applies by creation date. Waiting for branch and Being paid always show every open payout, whatever the date.'}
+                            The period applies by creation date.
                         </p>
+                        <div className="mt-2 empty:hidden">
+                            <OlderOpenBanner
+                                older={older}
+                                noun={
+                                    direction === 'payin'
+                                        ? ['open deposit', 'open deposits']
+                                        : ['open payout', 'open payouts']
+                                }
+                                onShow={visit}
+                            />
+                        </div>
                     </div>
                 )}
                 <div className="flex flex-wrap items-center gap-2 border-b border-ln2 px-3 py-2.5">
@@ -583,6 +604,11 @@ export default function Transactions({
                             ? 'No results'
                             : `Showing ${transactions.from}–${transactions.to} of ${transactions.total}`}{' '}
                         · newest first
+                        {direction === 'payin' &&
+                            !filters.status &&
+                            !filters.search &&
+                            figure('closed').count > 0 &&
+                            ` · ${figure('closed').count} expired in the Expired tab`}
                     </span>
                 </div>
                 <DataTable
